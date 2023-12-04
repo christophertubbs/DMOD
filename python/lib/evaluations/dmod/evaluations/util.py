@@ -42,6 +42,19 @@ _T = typing.TypeVar("_T")
 _V = typing.TypeVar("_V")
 
 
+def is_integer(value) -> bool:
+    """
+    Determines if a value is some sort of integer
+
+    Args:
+        value: A value that might be an integer
+
+    Returns:
+        True if the value is a vanilla or numpy integer, False otherwise
+    """
+    return numpy.issubdtype(type(value), numpy.integer)
+
+
 def configure_logging() -> typing.NoReturn:
     """
     Forms a very basic logger

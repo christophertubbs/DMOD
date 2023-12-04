@@ -10,6 +10,7 @@ from datetime import timedelta
 
 import math
 import numpy
+from typing_extensions import Self
 
 DURATION_PATTERN = re.compile(
     r"(?<=P)"
@@ -24,8 +25,32 @@ DURATION_PATTERN = re.compile(
 
 
 class RelativeDuration:
+    """
+    A datetime duration that supports all parts of the ISO 8601 datetime format.
+
+    The vanilla timedelta does not support durations of months
+    """
     @classmethod
     def from_string(cls, period: str) -> RelativeDuration:
+        """
+        Convert an ISO 8601 duration string to a duration
+
+        Details on the format may be found at https://en.wikipedia.org/wiki/ISO_8601#Durations
+
+        The general pattern is "P#Y#M#DT#H#M#S"
+
+        Examples:
+            >>> repr(RelativeDuration.from_string("PT1H"))
+            {"hours": 1}
+            >>> repr(RelativeDuration.from_string("P1YT3H4S"))
+            {"years": 1, "hours": 3, "seconds": 4}
+
+        Args:
+            period: The string to convert
+
+        Returns:
+            A new RelativeDuration object
+        """
         duration_match = DURATION_PATTERN.search(period)
         years = int(float(duration_match.group("years") or "0"))
         months = int(float(duration_match.group("months") or "0"))
@@ -45,11 +70,22 @@ class RelativeDuration:
 
     @classmethod
     def from_delta(cls, period: timedelta) -> RelativeDuration:
+        """
+        Convert a vanilla python timedelta into a RelativeDuration
+
+        Args:
+            period: The timedelta object to convert into a RelativeDuration
+
+        Returns:
+            A new RelativeDuration
+        """
+        # Normalize the values as much as possible by converting from pure seconds to days, hours, minutes, and seconds
         seconds = period.total_seconds()
         minutes, seconds = divmod(seconds, 60)
         hours, minutes = divmod(minutes, 60)
         days, hours = divmod(hours, 24)
 
+        # Months and years aren't indicated here since vanilla timedeltas don't support them
         return cls(
             days=days,
             hours=hours,
@@ -66,6 +102,17 @@ class RelativeDuration:
         minutes: int = None,
         seconds: typing.Union[int, float] = None
     ):
+        """
+        Constructor
+
+        Args:
+            years: The number of years forward or backward represented by this duration
+            months: The number of months forward or backward represented by this duration
+            days: The number of days forward or backward represented by this duration
+            hours: The number of hours forward or backward represented by this duration
+            minutes: The number of minutes forward or backward represented by this duration
+            seconds: The number of seconds forward or backward represented by this duration
+        """
         if years is not None and not numpy.issubdtype(type(years), numpy.integer):
             raise TypeError(
                 f"The number of years in a RelativeDuration must be an int - received a `{type(years)}` instead"
@@ -118,80 +165,106 @@ class RelativeDuration:
 
         Days can't overflow into Months since the number of days in a month is variable
         """
+        # If the years isn't a whole number, try to move as many months out of it as possible
+        # Say we have `3.8` years. This will add `9.6` months and leave `3` years
         if self.__years != math.floor(self.__years):
             self.__months += (self.__years - math.floor(self.__years)) * 12
             self.__years = math.floor(self.__years)
 
-        partial_hours = 0
+        # If the days isn't a whole number, try to move as many hours out of it as possible
+        # Say that the number of days is `3.29`. This will add `6.96` hours and leave the days at `3`
         if self.__days != math.floor(self.__days):
             self.__hours += (self.__days - math.floor(self.__days)) * 24
             self.__days = math.floor(self.__days)
 
-        partial_minutes = 0
+        # If the number of hours isn't a whole number, try to move as many minutes out of it as possible
+        # Say that the number of hours is `1.73`. This will add `43.8` minutes and leave the number of hours at `1`
         if self.__hours != math.floor(self.__hours):
             self.__minutes += (self.__hours - math.floor(self.__hours)) * 60
             self.__hours = math.floor(self.__hours)
 
+        # If the number of minutes isn't a whole number, try to move as many seconds out of it as possible
+        # Say that the number of minutes is `2.5`. This will add `30` to the seconds and leave the minutes at `2`
         if self.__minutes != math.floor(self.__minutes):
             self.__seconds += (self.__minutes - math.floor(self.__minutes)) * 60
             self.__minutes = math.floor(self.__minutes)
 
         self.__seconds = round(self.__seconds)
 
-        minutes_from_seconds = self.__seconds // 60
-        leftover_seconds = self.__seconds - (minutes_from_seconds * 60)
+        minutes_from_seconds, leftover_seconds = divmod(self.__seconds, 60)
 
         self.__seconds = leftover_seconds
         self.__minutes += minutes_from_seconds
 
-        hours_from_minutes = self.__minutes // 60
-        leftover_minutes = self.__minutes - (hours_from_minutes * 60)
+        hours_from_minutes, leftover_minutes = divmod(self.__minutes, 60)
 
         self.__minutes = leftover_minutes
         self.__hours += hours_from_minutes
 
-        days_from_hours = self.__hours // 24
-        leftover_hours = self.__hours - (days_from_hours * 24)
+        days_from_hours, leftover_hours = divmod(self.__hours, 24)
 
         self.__hours = leftover_hours
         self.__days += days_from_hours
 
-        years_from_months = self.__months // 12
-        leftover_months = self.__months - (years_from_months * 12)
+        years_from_months, leftover_months = divmod(self.__months, 12)
 
         self.__months = leftover_months
         self.__years += years_from_months
 
     @property
     def years(self) -> int:
+        """
+        The number of years to transform a date by
+        """
         return self.__years
 
     @property
     def months(self) -> int:
+        """
+        The number of months to transform a date by
+        """
         return self.__months
 
     @property
     def days(self) -> int:
+        """
+        The number of days to transform a date by
+        """
         return self.__days
 
     @property
     def hours(self) -> int:
+        """
+        The number of hours to transform a date by
+        """
         return self.__hours
 
     @property
     def minutes(self) -> int:
+        """
+        The number of minutes to transform a date by
+        """
         return self.__minutes
 
     @property
     def seconds(self) -> int:
+        """
+        The number of seconds to transform a date by
+        """
         return self.__seconds
 
     @property
     def total_months(self) -> int:
+        """
+        The total number of months (separate from days/hours/minutes/seconds) to transform a date by
+        """
         return self.months + (self.years * 12)
 
     @property
     def total_seconds(self) -> int:
+        """
+        The total number of seconds (separate from years/months) to transform a date by
+        """
         seconds_in_minutes = 60
         seconds_in_hours = 60 * seconds_in_minutes
         seconds_in_days = 24 * seconds_in_hours
@@ -201,7 +274,16 @@ class RelativeDuration:
             + (self.minutes * seconds_in_minutes) \
             + self.seconds
 
-    def add_year(self, quantity: typing.Union[int, float] = None) -> RelativeDuration:
+    def add_year(self, quantity: typing.Union[int, float] = None) -> Self:
+        """
+        Add a year to the duration
+
+        Args:
+            quantity: The amount of years to add. Default: 1
+
+        Returns:
+            The updated duration
+        """
         if quantity is None:
             quantity = 1
 
@@ -210,7 +292,16 @@ class RelativeDuration:
 
         return self
 
-    def add_month(self, quantity: typing.Union[int, float] = None) -> RelativeDuration:
+    def add_month(self, quantity: typing.Union[int, float] = None) -> Self:
+        """
+        Add a number of months to the duration
+
+        Args:
+            quantity: The number of months to add. Default: 1
+
+        Returns:
+            The updated duration
+        """
         if quantity is None:
             quantity = 1
 
@@ -219,7 +310,7 @@ class RelativeDuration:
 
         return self
 
-    def add_day(self, quantity: typing.Union[int, float] = None) -> RelativeDuration:
+    def add_day(self, quantity: typing.Union[int, float] = None) -> Self:
         if quantity is None:
             quantity = 1
 
@@ -255,17 +346,26 @@ class RelativeDuration:
 
         return other
 
-    def __eq__(self, other: typing.Union[RelativeDuration, timedelta]) -> bool:
+    def __eq__(self, other: typing.Union[RelativeDuration, timedelta, str]) -> bool:
+        if isinstance(other, str):
+            other = RelativeDuration.from_string(other)
+
         other = self.__other_is_comparable(other)
 
         return self.total_months == other.total_months and self.total_seconds == other.total_seconds
 
-    def __ne__(self, other: typing.Union[RelativeDuration, timedelta]) -> bool:
+    def __ne__(self, other: typing.Union[RelativeDuration, timedelta, str]) -> bool:
+        if isinstance(other, str):
+            other = RelativeDuration.from_string(other)
+
         other = self.__other_is_comparable(other)
 
         return self.total_months != other.total_months or self.total_seconds != other.total_seconds
 
     def __gt__(self, other: typing.Union[RelativeDuration, timedelta]) -> bool:
+        if isinstance(other, str):
+            other = RelativeDuration.from_string(other)
+
         other = self.__other_is_comparable(other)
 
         if self == other:
@@ -289,7 +389,10 @@ class RelativeDuration:
     def __ge__(self, other: typing.Union[RelativeDuration, timedelta]) -> bool:
         return not self < other
 
-    def __lt__(self, other: typing.Union[RelativeDuration, timedelta]) -> bool:
+    def __lt__(self, other: typing.Union[RelativeDuration, timedelta, str]) -> bool:
+        if isinstance(other, str):
+            other = RelativeDuration.from_string(other)
+
         other = self.__other_is_comparable(other)
 
         if self == other:
@@ -394,23 +497,5 @@ class RelativeDuration:
             seconds=self.seconds * other
         )
 
-    def __truediv__(self, other: typing.Union[int, float]) -> RelativeDuration:
-        if not isinstance(other, (int, float)):
-            raise TypeError(
-                f"Cannot multiple duration - durations may only be divided by an int or float "
-                f"but received '{other}: {type(other)}'"
-            )
-
-        if other == 0:
-            raise ZeroDivisionError(
-                f"A RelativeDuration cannot be divided by 0"
-            )
-
-        return self.__class__(
-            years=self.years / other,
-            months=self.months / other,
-            days=self.days / other,
-            hours=self.hours / other,
-            minutes=self.minutes / other,
-            seconds=self.seconds / other
-        )
+    def __truediv__(self, other) -> RelativeDuration:
+        raise Exception("Relative Durations are not divisible")
