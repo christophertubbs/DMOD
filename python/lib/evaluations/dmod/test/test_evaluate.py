@@ -4,6 +4,7 @@ import json
 import typing
 
 from datetime import datetime
+from datetime import timezone
 
 import numpy
 
@@ -18,6 +19,7 @@ from .common import EPSILON
 
 CFS_TO_CMS_CONFIG_PATH = os.path.join(RESOURCE_DIRECTORY, "cfs_vs_cms_evaluation.json")
 CFS_TO_CFS_CONFIG_PATH = os.path.join(RESOURCE_DIRECTORY, "cfs_vs_cfs_evaluation.json")
+VARIABLE_CONFIG_PATH = os.path.join(RESOURCE_DIRECTORY, "variable_evaluation.json")
 
 
 def get_expected_evaluation_results() -> typing.Dict[typing.Tuple[str, str], dict]:
@@ -524,9 +526,17 @@ class TestEvaluate(unittest.TestCase):
 
         return specification.EvaluationSpecification.create(raw_config)
 
+    @classmethod
+    def get_variable_specification(cls) -> specification.EvaluationSpecification:
+        with open(VARIABLE_CONFIG_PATH) as config_file:
+            raw_config = json.load(config_file)
+
+        return specification.EvaluationSpecification.create(raw_config)
+
     def setUp(self) -> None:
         self.__cfs_to_cms_specification = self.get_cfs_to_cms_specification()
         self.__cfs_to_cfs_specification = self.get_cfs_to_cfs_specification()
+        self.__variable_specification = self.get_variable_specification()
 
     def test_load_cfs_to_cfs(self):
         cfs_to_cfs_evaluator = evaluate.Evaluator(self.__cfs_to_cfs_specification)
@@ -535,6 +545,19 @@ class TestEvaluate(unittest.TestCase):
     def test_load_cfs_to_cms(self):
         cfs_to_cms_evaluator = evaluate.Evaluator(self.__cfs_to_cms_specification)
         self.make_assertions(cfs_to_cms_evaluator)
+
+    def test_variable_specification(self):
+        configuration = self.__variable_specification
+        now = datetime.now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M%z")
+        self.assertEqual(configuration.observations[0].backend.properties['params']['endDT'], now)
+        self.assertEqual(configuration.predictions[0].backend.address, '23048252342/cat.*cfs.csv')
+        for metric in self.__variable_specification.scheme.metric_functions:
+            if metric.name == "Pearson Correlation Coefficient":
+                self.assertEqual(metric.weight, configuration.variables['high metric weight'])
+            elif metric.name in ('Kling-Gupta Efficiency', 'Normalized Nash-Sutcliffe Efficiency'):
+                self.assertEqual(metric.weight, configuration.variables['medium_metric_weight'])
+            else:
+                self.assertEqual(metric.weight, configuration.variables['low metric weight'])
 
     def make_assertions(self, evaluator: evaluate.Evaluator):
         evaluation_results = evaluator.evaluate()

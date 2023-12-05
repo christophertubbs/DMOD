@@ -1,6 +1,8 @@
 """
 Defines the core classes for specifications and how to create them
 """
+from __future__ import annotations
+
 import typing
 import json
 import logging
@@ -9,6 +11,7 @@ import abc
 import os
 import re
 import traceback
+
 import pydantic
 
 import dmod.core.common as common
@@ -23,6 +26,8 @@ from .template import TemplateManager
 from .. import util
 
 from .helpers import is_a_value
+from ..utilities.expressions import ExpressionVariableType
+from ..utilities.expressions import process_expressions
 
 _CLASS_TYPE = typing.TypeVar("_CLASS_TYPE")
 
@@ -110,13 +115,13 @@ def get_constructor_parameters(cls: typing.Type[_CLASS_TYPE]) -> typing.Mapping[
 
 # TODO: Evaluate need for these functions after the integration with pydantic
 def create_class_instance(
-    cls: typing.Type["Specification"],
+    cls: typing.Type[Specification],
     data,
     template_manager: TemplateManager = None,
     decoder_type: typing.Type[json.JSONDecoder] = None,
     messages: typing.List[str] = None,
     validate: bool = None
-) -> typing.Optional[typing.Union["Specification",typing.Sequence["Specification"]]]:
+) -> typing.Optional[typing.Union[Specification, typing.Sequence[Specification]]]:
     """
     Dynamically creates a class based on the type of class and the given parameters
 
@@ -126,7 +131,7 @@ def create_class_instance(
         template_manager: A template manager that can help apply templates to generated classes
         decoder_type: An optional type of json decoder that will help deserialize any json inputs
         messages: A container for any possible messages to use if errors are encountered
-        validate: Indicates taht the system is just trying to see if items can be built - pass back messages instead of throwing them if true
+        validate: Indicates that the system is just trying to see if items can be built - pass back messages instead of throwing them if true
     Returns:
         An instance of the given `cls`
     """
@@ -219,6 +224,13 @@ def create_class_instance(
     missing_parameters = list()
 
     if hasattr(data, "__getitem__") and not isinstance(data, typing.Sequence):
+        # Here we can assume that `data` is some form of mapping
+
+        # Look to apply any found variables and expression. Do so up to five time in case there is some sort
+        # of iterative logic. For example, say an expression yields a variable name, that yields an expression,
+        # that yields a variable name. Cut off at 5 to avoid any potential infinite loops.
+        process_expressions(data=data, variables=data.get("variables", {}))
+
         # If it is determined that the object to construct supports templates and a template is defined, we want to
         # default all values to that of the template and override those values by what was given by the caller
         has_template_name = bool(data.get("template_name")) or bool(data.get("template"))
@@ -229,7 +241,14 @@ def create_class_instance(
         treat_as_template_configuration = templates_are_supported and template_is_indicated
 
         # We want to shift that values from the input into this overlay variable to be applied later if need be
-        overlay = {key: value for key, value in data.items() if key != 'template_name'} if treat_as_template_configuration else None
+        if treat_as_template_configuration:
+            overlay = {
+                key: value
+                for key, value in data.items()
+                if key != 'template_name'
+            }
+        else:
+            overlay = None
 
         # Start setting variable values to those of a template if the caller specified that it's needed
         if treat_as_template_configuration and has_multiple_templates:
@@ -380,7 +399,10 @@ class Specification(abc.ABC, pydantic.BaseModel):
     """
     Instructions for how different aspects of an evaluation should work
     """
-
+    variables: typing.Optional[typing.Dict[str, ExpressionVariableType]] = pydantic.Field(
+        default_factory=dict,
+        description="Variables that may be subbed in throughout the document"
+    )
     properties: typing.Optional[typing.Dict[str, typing.Any]] = pydantic.Field(
         default_factory=dict,
         description="Extra fields related to this configuration"

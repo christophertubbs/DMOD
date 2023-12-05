@@ -8,6 +8,8 @@ import collections
 import numpy
 import pandas
 
+from datetime import datetime
+
 from pydantic import Field
 
 import dmod.metrics as metrics
@@ -191,7 +193,6 @@ class EvaluationSpecification(TemplatedSpecification):
                     template_manager=template_manager,
                     decoder_type=decoder_type
                 )
-
 
     def validate_self(self) -> typing.Sequence[str]:
         messages = list()
