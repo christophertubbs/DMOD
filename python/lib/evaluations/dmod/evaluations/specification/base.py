@@ -26,7 +26,7 @@ from .template import TemplateManager
 from .. import util
 
 from .helpers import is_a_value
-from ..utilities.expressions import ExpressionVariableType
+from ..utilities.expressions import _CombinedStaticVariableType
 from ..utilities.expressions import process_expressions
 
 _CLASS_TYPE = typing.TypeVar("_CLASS_TYPE")
@@ -399,7 +399,7 @@ class Specification(abc.ABC, pydantic.BaseModel):
     """
     Instructions for how different aspects of an evaluation should work
     """
-    variables: typing.Optional[typing.Dict[str, ExpressionVariableType]] = pydantic.Field(
+    variables: typing.Optional[typing.Dict[str, _CombinedStaticVariableType]] = pydantic.Field(
         default_factory=dict,
         description="Variables that may be subbed in throughout the document"
     )
