@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import pathlib
@@ -61,6 +62,9 @@ yield a variable name that needs processing that yields an expression that needs
 to artificially prevent infinite loops.
 """
 
+DEFAULT_NEW_VARIABLE_KEY: typing.Final[str] = "variables"
+"""The default key in mappings that indicate the mapped values are variables used for substitution"""
+
 VariablePattern = re.compile(
     r"\s*(?<=\{\{%)(?P<variable_name>\s*[-a-zA-Z0-9_\\+]+(\s*[-a-zA-Z0-9_\\+]+)*\s*?)(?=%}})\s*"
 )
@@ -78,14 +82,15 @@ Examples:
     True
 """
 
+
 ExpressionPattern = re.compile(
-    r"(?<=<%)\s*"
-    r"'(?P<value_one>\[?[-a-zA-Z0-9_\\+.]+(,?\s*[-a-zA-Z0-9_\\+]+)*]?)'\s*"
-    r":?\s*(?P<value_one_cast>(?<=:)[A-aZ-z0-9_]+)?\s*"
-    r"(?P<operator>(-|\+|\*|/|get|\?\?|'[A-Za-z0-9_.]+'))\s*"
-    r"'(?P<value_two>\[?[a-zA-Z0-9_\\+.-]+(,?\s*[a-zA-Z0-9_\\+.-]+)*]?)'\s*"
-    r":?\s*(?P<value_two_cast>[A-aZ-z0-9_.]+)?\s*"
-    r"(?=%>)"
+    r"<%\s*"
+    r"'\s*(?P<value_one>[^']+)\s*'\s*"
+    r":?\s*(?P<value_one_cast>(?<=:)\s*[A-aZ-z0-9_.]+)?\s*"
+    r"(?P<operator>(-|\+|\*|/|\?\?|[A-Za-z0-9_.]+))\s*"
+    r"'\s*(?P<value_two>[^']+)\s*'\s*"
+    r":?\s*(?P<value_two_cast>(?<=:)\s*[A-aZ-z0-9_.]+)?\s*"
+    r"%>"
 )
 """
 A pattern revealing an operation to perform on two values.
@@ -116,9 +121,17 @@ Examples:
 WalkableObject = typing.Union[typing.MutableSequence, typing.MutableMapping[str, typing.Any]]
 """Represents an object that may be iterated over"""
 
-WalkablePredicate = typing.Callable[[WalkableObject, typing.Union[str, int], typing.Any], bool]
+WalkablePredicate = typing.Callable[
+    [
+        WalkableObject,
+        typing.Mapping[str, typing.Any],
+        typing.Union[str, int],
+        typing.Any
+    ],
+    bool
+]
 """
-Represents a boolean function that investigates items from an iterable object. `f(object being walked, key or index, value)`
+Represents a boolean function that investigates items from an iterable object. `f(object being walked, available variables, key or index, value)`
 """
 
 WalkableTransform = typing.Callable[
@@ -212,6 +225,82 @@ class AvailableModules:
         return element
 
 
+@dataclasses.dataclass
+class ExtractedExpression:
+    """
+    A data transfer object defining the parts of an expression that may be extracted from a string
+    """
+    value_one: str
+    value_two: str
+    operator: str
+    value_one_cast: typing.Optional[str] = dataclasses.field(default=None)
+    value_two_cast: typing.Optional[str] = dataclasses.field(default=None)
+
+
+def extract_variable_name(value: str) -> typing.Optional[str]:
+    """
+    Attempt to identify the name of a variable from a string
+
+    Args:
+        value: The string to investigate
+
+    Returns:
+        An identified value that might be a variable name
+    """
+    if not isinstance(value, str):
+        return None
+
+    matching_variable_name = VariablePattern.search(value)
+
+    if matching_variable_name is None:
+        return None
+
+    variable_name = matching_variable_name.group("variable_name")
+    variable_name = variable_name.strip()
+    return variable_name
+
+
+def extract_expression(value: str) -> typing.Optional[ExtractedExpression]:
+    """
+    Extract each member of an expression definition
+
+    Args:
+        value: The string that might contain an expression
+
+    Returns:
+        Individual members of an identified expression
+    """
+    if not isinstance(value, str):
+        return None
+
+    matching_expression = ExpressionPattern.search(value)
+
+    if not matching_expression:
+        return None
+
+    value_one = matching_expression.group("value_one").strip().strip("'").strip()
+    value_two = matching_expression.group("value_two").strip().strip("'").strip()
+    operator = matching_expression.group("operator").strip().strip("'").strip()
+
+    value_one_cast = matching_expression.group("value_one_cast")
+
+    if isinstance(value_one_cast, str):
+        value_one_cast = value_one_cast.strip().strip("'").strip()
+
+    value_two_cast = matching_expression.group("value_two_cast")
+
+    if isinstance(value_two_cast, str):
+        value_two_cast = value_two_cast.strip().strip("'").strip()
+
+    return ExtractedExpression(
+        value_one=value_one,
+        value_two=value_two,
+        operator=operator,
+        value_one_cast=value_one_cast,
+        value_two_cast=value_two_cast
+    )
+
+
 def transform_tree(
     tree: typing.MutableMapping[str, typing.Any],
     predicate: WalkablePredicate,
@@ -285,7 +374,7 @@ def transform_tree(
                 current_variables=variables,
                 new_variable_key=new_variable_key
             )
-        elif predicate(tree, key, value):
+        elif predicate(tree, variables, key, value):
             # If the predicate determines that the encountered value should be modified, transform the value
             transformed_value = transformation(variables, tree, key, value)
 
@@ -340,7 +429,7 @@ def transform_sequence(
                 current_variables=current_variables,
                 new_variable_key=new_variable_key
             )
-        elif predicate(sequence, index, value):
+        elif predicate(sequence, current_variables, index, value):
             # If the predicate determines that the encountered value should be modified, transform the value
             transformed_value = transformation(current_variables, sequence, index, value)
 
@@ -414,6 +503,15 @@ def perform_operation(value_one, operation: str, value_two) -> typing.Any:
 
 
 def value_to_sequence(value) -> typing.Sequence:
+    """
+    Convert a value into a list of values
+
+    Args:
+        value: The value to split up into a list
+
+    Returns:
+        A list of values based on what was passed in
+    """
     if isinstance(value, typing.Sequence) and not isinstance(value, (str, bytes, typing.Mapping)):
         return value
 
@@ -503,7 +601,12 @@ def cast_value(value, cast_name: str = None) -> typing.Any:
     return AvailableModules.call(cast_name, value)
 
 
-def evaluate_expression(variables: typing.Mapping[str, typing.Any], expression: str) -> typing.Any:
+def evaluate_expression(
+    variables: typing.Mapping[str, typing.Any],
+    collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
+    key_or_index: typing.Union[str, int],
+    expression: str
+) -> typing.Any:
     identified_expression_parts = ExpressionPattern.search(expression)
 
     if identified_expression_parts is None:
@@ -539,153 +642,381 @@ CONSTANT_VARIABLE_VALUES: typing.Mapping[str, StaticVariableType] = {
     "NOW": lambda *args, **kwargs: datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M%z"),
     "NULL": None
 }
+"""Stock variable values that may be reused"""
 
 
-def search_for_and_apply_variables(data: typing.MutableMapping, variables: typing.Mapping[str, typing.Any]) -> int:
-    def should_replace_variable(
-        collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
-        key_or_index: typing.Union[str, int],
-        encountered_value: _CombinedStaticVariableType
-    ) -> bool:
-        if not isinstance(encountered_value, str):
-            return False
+def transform_value(
+    collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
+    key_or_index: typing.Union[str, int],
+    predicate: WalkablePredicate,
+    transformation: WalkableTransform,
+    variables: typing.Mapping[str, typing.Any]
+) -> int:
+    """
+    Apply nested transformations on identified values
 
-        try:
-            variable_match = VariablePattern.search(encountered_value)
-        except TypeError as error:
-            logging.error(f"Could not search for a variable in {encountered_value}; {error}")
-            raise
+    Args:
+        collection:
+        key_or_index:
+        predicate:
+        transformation:
+        variables:
 
-        if not variable_match:
-            return False
+    Returns:
 
-        variable_name: str = variable_match.group("variable_name")
-        variable_name = variable_name.strip()
+    """
+    change_count = 0
+    value = collection[key_or_index]
 
-        return variable_name in variables or variable_name in CONSTANT_VARIABLE_VALUES
+    # Store transformed values in order to keep track of conditions that indicate an infinite loop
+    tracked_values = [
+        value
+    ]
 
-    def apply_variable(
-        current_variables: typing.Mapping[str, StaticVariableType],
-        collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
-        key_or_index: typing.Union[str, int],
-        encountered_value: _CombinedStaticVariableType
-    ) -> typing.Any:
-        variable_name: str = VariablePattern.search(encountered_value).group("variable_name").strip()
+    # The currently transformed value
+    latest_value = value
 
-        if variable_name in current_variables:
-            replacement = current_variables[variable_name]
-        elif variable_name in CONSTANT_VARIABLE_VALUES:
-            replacement = CONSTANT_VARIABLE_VALUES[variable_name]
-        else:
-            return encountered_value
+    def loop_found(current_value: typing.Any = None):
+        """
+        Returns:
+            True if
+        """
+        if current_value is None:
+            current_value = latest_value
 
-        if isinstance(replacement, typing.Callable):
-            replacement = replacement()
+        return current_value in tracked_values
 
-        with_variable_name_pattern = r"\s*\{\{%\s*" + variable_name + r"\s*%}}"
-        value_without_variable = re.sub(with_variable_name_pattern, "", encountered_value)
+    # Evaluate all expressions encountered in this value.
+    # This should completely evaluate values like:
+    # "<% <% 13 + 5 %> + <% 8 - 2 %> %>"
+    # and transform it into
+    # 24
+    while predicate(collection, key_or_index, latest_value) and not loop_found():
+        # Run the transform function to evaluate the expression
+        newly_transformed_value = transformation(
+            variables,
+            collection,
+            key_or_index,
+            latest_value
+        )
 
-        if len(value_without_variable) > 0:
-            replacement = re.sub(with_variable_name_pattern, str(replacement), encountered_value)
+        # If we've already encountered this value we'll be in an infinite loop where we're continually
+        # churning out the same values. Fail immediately to prevent a locking operation
+        if loop_found(newly_transformed_value):
+            raise ValueError(
+                f'Failed to correctly evaluate an expression - "{tracked_values[0]}" with the key "{key_or_index}" '
+                f'might cause an infinite loop'
+            )
 
-        return replacement
+        # Add the transformed value for loop tracking
+        tracked_values.append(newly_transformed_value)
+        latest_value = newly_transformed_value
+
+        # Assign the new value to the dataset
+        collection[key_or_index] = latest_value
+        change_count += 1
+
+    return change_count
+
+
+def create_variables_for_use(
+    data: typing.MutableMapping,
+    variables: typing.Mapping[str, typing.Any],
+    new_variable_key: str = None
+) -> typing.Tuple[typing.MutableMapping[str, typing.Any], bool]:
+    """
+    Creates a new collection of variables to use for substitution based on previous data and potentially new data
+
+    Args:
+        data: The collection that may or may not hold new variable definitions
+        variables: Previously existing variable data
+        new_variable_key: The key that indicates a member in the collection that holds new variables
+
+    Returns:
+        A new map of usable variables and whether new variables were introduced
+    """
+    if new_variable_key is None:
+        new_variable_key = DEFAULT_NEW_VARIABLE_KEY
+
+    if not isinstance(variables, typing.Mapping):
+        variables = {}
+
+    if new_variable_key in data:
+        variables_to_use = {
+            key: value
+            for key, value in data.get(new_variable_key, {}).items()
+        }
+        has_new_variables = len(variables_to_use) > 0
+    else:
+        variables_to_use = {}
+        has_new_variables = False
+
+    variables_to_use.update({
+        key: value
+        for key, value in variables
+        if key not in variables_to_use
+    })
+
+    return variables_to_use, has_new_variables
+
+
+def should_replace_variable(
+    collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
+    variables: typing.Mapping[str, typing.Any],
+    key_or_index: typing.Union[str, int],
+    encountered_value: _CombinedStaticVariableType
+) -> bool:
+    """
+    Determines whether a value declares that there is a value that should be replaced with a variable
+
+    Args:
+        collection: That collection that contains the current value
+        key_or_index: The key of the current value
+        encountered_value: The current value to check
+        variables: A collection of currently available variables
+
+    Returns:
+        True if the value needs to be transformed
+    """
+    if not variables:
+        raise ValueError(f"Cannot determine if a variable use should be replaced - no variables were passed")
+
+    # A value that isn't a string can't hold a variable, so move on if it's not one
+    if not isinstance(encountered_value, str):
+        return False
+
+    # Try to find a value matching the variable pattern
+    try:
+        variable_match = VariablePattern.search(encountered_value)
+    except TypeError as error:
+        logging.error(f"Could not search for a variable in {encountered_value}; {error}")
+        raise
+
+    # If nothing was found, declare that a replacement isn't needed
+    if not variable_match:
+        return False
+
+    # Check to see if a variable by the given name even exists
+    variable_name: str = variable_match.group("variable_name")
+    variable_name = variable_name.strip()
+
+    return variable_name in variables or variable_name in CONSTANT_VARIABLE_VALUES
+
+
+def apply_variable(
+    current_variables: typing.Mapping[str, StaticVariableType],
+    collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
+    key_or_index: typing.Union[str, int],
+    encountered_value: _CombinedStaticVariableType
+) -> typing.Any:
+    """
+    Replace the current value with an available replacement
+
+    Args:
+        current_variables: The collection of defined variables available for use
+        collection: The collection that the encountered values came from
+        key_or_index: The sequential index or map key of the encountered value
+        encountered_value: The value to be transformed
+
+    Returns:
+        A new value containing the replacement for the indicated variable
+    """
+    variable_name: str = VariablePattern.search(encountered_value).group("variable_name").strip()
+
+    if variable_name in current_variables:
+        replacement = current_variables[variable_name]
+    elif variable_name in CONSTANT_VARIABLE_VALUES:
+        replacement = CONSTANT_VARIABLE_VALUES[variable_name]
+    else:
+        return encountered_value
+
+    if isinstance(replacement, typing.Callable):
+        replacement = replacement()
+
+    with_variable_name_pattern = r"\{\{%\s*" + variable_name + r"\s*%}}"
+    value_without_variable = re.sub(with_variable_name_pattern, "", encountered_value)
+
+    if len(value_without_variable) > 0:
+        replacement = re.sub(with_variable_name_pattern, str(replacement), encountered_value)
+        replacement = replacement.strip()
+
+    return replacement
+
+
+def search_for_and_apply_variables(
+    data: typing.MutableMapping,
+    variables: typing.Mapping[str, typing.Any] = None,
+    new_variable_key: str = None
+) -> int:
+    """
+    Looks for and replace values with specified variable values
+
+    Args:
+        data: The tree to iterate over
+        variables: A collection of variables used to replace found values
+        new_variable_key: A key that indicates that a member of the data contains more variable definitions
+
+    Returns:
+        The number of values replaced
+    """
+    if new_variable_key is None:
+        new_variable_key = DEFAULT_NEW_VARIABLE_KEY
+
+    variables_to_use, has_new_variables = create_variables_for_use(
+        data=data,
+        variables=variables,
+        new_variable_key=new_variable_key
+    )
 
     change_count = 0
+
+    # Iterate over each key and value to find values to investigate and nested structures to further walk
     for key, value in data.items():
-        if key == 'variables':
+        # If new variables were encountered and we're on the key that gave them to us, we can go ahead and skip this
+        # step
+        if has_new_variables and key == new_variable_key:
             continue
 
+        # If we've hit another tree, we want to walk it to find more variables to replace
         if isinstance(value, typing.MutableMapping):
             change_count += transform_tree(
                 tree=value,
                 predicate=should_replace_variable,
                 transformation=apply_variable,
-                current_variables=variables,
-                new_variable_key='variables'
+                current_variables=variables_to_use,
+                new_variable_key=new_variable_key
             )
         elif not isinstance(value, (str, bytes, typing.Mapping)) and isinstance(value, typing.MutableSequence):
             change_count += transform_sequence(
                 sequence=value,
                 predicate=should_replace_variable,
                 transformation=apply_variable,
-                current_variables=variables,
-                new_variable_key='variables'
+                current_variables=variables_to_use,
+                new_variable_key=new_variable_key
             )
         elif should_replace_variable(collection=data, key_or_index=key, encountered_value=value):
-            transformed_value = apply_variable(
-                current_variables=variables,
+            change_count += transform_value(
                 collection=data,
                 key_or_index=key,
-                encountered_value=value
+                predicate=should_replace_variable,
+                transformation=apply_variable,
+                variables=variables_to_use
             )
-
-            if transformed_value != value:
-                data[key] = transformed_value
-                change_count += 1
 
     return change_count
 
 
-def search_for_and_apply_expressions(data: typing.MutableMapping, variables: typing.Mapping) -> int:
-    def is_expression(
-        collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
-        key_or_index: typing.Union[str, int],
-        encountered_value: _CombinedStaticVariableType
-    ) -> bool:
-        if not isinstance(encountered_value, str):
-            return False
+def is_expression(
+    collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
+    variables: typing.Mapping,
+    key_or_index: typing.Union[str, int],
+    encountered_value: _CombinedStaticVariableType
+) -> bool:
+    """
+    Determines if an encountered value contains an expression that needs to be evaluated
 
-        return ExpressionPattern.search(encountered_value) is not None
+    Args:
+        collection: The original collection that has the value that might be an expression
+        variables: Variables that are available for use
+        key_or_index: The map key or sequence index of the encountered value
+        encountered_value: The value to check
 
-    def apply_expression(
-        current_variables: typing.Mapping[str, StaticVariableType],
-        collection: typing.Union[typing.MutableMapping, typing.MutableSequence],
-        key_or_index: typing.Union[str, int],
-        encountered_value: _CombinedStaticVariableType
-    ) -> typing.Any:
-        return evaluate_expression(current_variables, encountered_value)
+    Returns:
+        True if the encountered value is a string that contains an expression
+    """
+    if not isinstance(encountered_value, str):
+        return False
+
+    return ExpressionPattern.search(encountered_value) is not None
+
+
+def search_for_and_apply_expressions(
+    data: typing.MutableMapping,
+    variables: typing.Mapping = None,
+    new_variable_key: str = None
+) -> int:
+    """
+    Looks for and evaluates found expressions within a tree
+
+    Args:
+        data: The tree to iterate over
+        variables: A collection of variables used to replace found values
+        new_variable_key: A key that indicates that a member of the data contains more variable definitions
+
+    Returns:
+        The number of expressions evaluated
+    """
+    if new_variable_key is None:
+        new_variable_key = DEFAULT_NEW_VARIABLE_KEY
+
+    variables_to_use, has_new_variables = create_variables_for_use(
+        data=data,
+        variables=variables,
+        new_variable_key=new_variable_key
+    )
 
     change_count = 0
+
+    # Iterate over each key and value to find values to investigate and nested structures to further walk
     for key, value in data.items():
-        if key == 'variables':
+        # If new variables were encountered and we're on the key that gave them to us, we can go ahead and skip this
+        # step
+        if has_new_variables and key == new_variable_key:
             continue
 
+        # If we've hit another tree, we want to walk it to find more values to operate on
         if isinstance(value, typing.MutableMapping):
             change_count += transform_tree(
                 tree=value,
                 predicate=is_expression,
-                transformation=apply_expression,
-                current_variables=variables,
-                new_variable_key='variables'
+                transformation=evaluate_expression,
+                current_variables=variables_to_use,
+                new_variable_key=new_variable_key
             )
         elif not isinstance(value, (str, bytes, typing.Mapping)) and isinstance(value, typing.MutableSequence):
             change_count += transform_sequence(
                 sequence=value,
                 predicate=is_expression,
-                transformation=apply_expression,
-                current_variables=variables,
-                new_variable_key='variables'
+                transformation=evaluate_expression,
+                current_variables=variables_to_use,
+                new_variable_key=new_variable_key
             )
-        elif is_expression(collection=data, key_or_index=key, encountered_value=value):
-            transformed_value = apply_expression(
-                current_variables=variables,
+        elif is_expression(collection=data, variables=variables_to_use, key_or_index=key, encountered_value=value):
+            change_count += transform_value(
                 collection=data,
                 key_or_index=key,
-                encountered_value=value
+                predicate=is_expression,
+                transformation=evaluate_expression,
+                variables=variables_to_use
             )
-            if transformed_value != value:
-                data[key] = transformed_value
-                change_count += 1
+
     return change_count
 
 
-def process_expressions(data: typing.MutableMapping, variables: typing.Mapping, iterations: int = None):
+def process_expressions(data: typing.MutableMapping, variables: typing.Mapping, iterations: int = None) -> int:
+    """
+    Searches for and applies variable values and evaluates expressions several times to ensure that
+    nested and changed variables and expressions are correctly evaluated
+
+    Args:
+        data: The initial tree to run expressions upon
+        variables: Variables that may be used to set values
+        iterations: The number of times that
+
+    Returns:
+        The total number of changes that were applied
+    """
     if iterations is None:
         iterations = DEFAULT_PROCESS_ITERATION_COUNT
+
+    total_change_count = 0
 
     for _ in range(iterations):
         change_count = search_for_and_apply_variables(data=data, variables=variables)
         change_count += search_for_and_apply_expressions(data=data, variables=variables)
+        total_change_count += change_count
 
         if change_count == 0:
             break
+
+    return total_change_count
