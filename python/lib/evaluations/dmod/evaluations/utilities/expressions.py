@@ -441,13 +441,123 @@ def transform_sequence(
     return change_count
 
 
+def add_to(value_one, value_two):
+    if isinstance(value_one, typing.Set):
+        return {val for val in value_one}.union(value_to_sequence(value_two))
+
+    if isinstance(value_two, typing.Set):
+        return set(value_to_sequence(value_one)).union({value for value in value_two})
+
+    if isinstance(value_one, typing.Mapping) and isinstance(value_two, typing.Mapping):
+        first = {
+            key: value
+            for key, value in value_one.items()
+        }
+        first.update({
+            key: value
+            for key, value in value_two.items()
+        })
+        return first
+
+    if isinstance(value_one, typing.Mapping) or isinstance(value_two, typing.Mapping):
+        raise TypeError(
+            f"'+' is not a valid operator for a dictionary and non-dictionary - "
+            f"received '{value_one} ({type(value_one)})' and '{value_two} ({type(value_two)})'"
+        )
+
+    if isinstance(value_one, bytes):
+        value_one = value_one.decode()
+
+    if isinstance(value_two, bytes):
+        value_two = value_two.decode()
+
+    value_one_is_string = isinstance(value_one, str)
+    value_two_is_string = isinstance(value_two, str)
+
+    if value_one_is_string:
+        value_one = value_one.strip()
+
+    if value_two_is_string:
+        value_two = value_two.strip()
+
+    if not value_one_is_string and isinstance(value_one, typing.Iterable):
+        if not value_two_is_string and isinstance(value_two, typing.Iterable):
+            return [value for value in value_one] + [value for value in value_two]
+        else:
+            return [value for value in value_one] + value_to_sequence(value_two)
+
+    if not value_two_is_string and isinstance(value_two, typing.Iterable):
+        return value_to_sequence(value_one) + [value for value in value_two]
+
+    value_one_is_string_integer = value_one_is_string and re.match(r"^-?\d+$", value_one) is not None
+    value_two_is_string_integer = value_two_is_string and re.match(r"^-?\d+$", value_two) is not None
+    value_one_is_string_float = value_one_is_string and re.match(r"^-?\d+\.\d*$", value_one) is not None
+    value_two_is_string_float = value_two_is_string and re.match(r"^-?\d+\.\d*$", value_two) is not None
+
+    value_one_is_int = isinstance(value_one, int)
+    value_two_is_int = isinstance(value_two, int)
+
+    value_one_is_float = isinstance(value_one, float)
+    value_two_is_float = isinstance(value_two, float)
+
+    if value_one_is_string_float and (value_two_is_string_integer or value_two_is_string_float or value_two_is_int or value_two_is_float):
+        return float(value_one) + float(value_two)
+    elif value_one_is_string_integer and (value_two_is_int or value_two_is_float):
+        return int(value_one) + value_two
+    elif value_one_is_string_integer and value_two_is_string_integer:
+        return int(value_one) + int(value_two)
+    elif value_one_is_string_integer and value_two_is_string_float:
+        return float(value_one) + float(value_two)
+
+    if (value_one_is_int or value_one_is_float) and (value_two_is_int or value_two_is_float):
+        return value_one + value_two
+
+    if value_one_is_float and (value_two_is_string_float or value_two_is_string_integer):
+        return value_one + float(value_two)
+
+    if value_one_is_int and value_two_is_string_float:
+        return value_one + float(value_two)
+
+    if value_one_is_int and value_two_is_string_integer:
+        return value_one + int(value_two)
+
+    if isinstance(value_one, type(value_two)) and hasattr(value_one, "__add__"):
+        return value_one + value_two
+
+    return str(value_one) + str(value_two)
+
+
+def get_item(value_one, value_two):
+    if isinstance(value_one, typing.Mapping):
+        return value_one[value_two]
+
+    if not isinstance(value_one, (str, typing.Sequence)) and isinstance(value_one, typing.Iterable):
+        value_one = value_to_sequence(value_one)
+
+    if not hasattr(value_one, "__getitem__"):
+        raise TypeError(f"Cannot get item from collection - it is not indexible")
+
+    if isinstance(value_two, (int, slice)):
+        return value_one[value_two]
+    if isinstance(value_two, float):
+        return value_one[round(value_two)]
+
+    if isinstance(value_two, str) and re.match(r"^-?\d+$", value_two):
+        return value_one[int(value_two)]
+
+    if isinstance(value_two, str) and re.match(r"^-?\d+\.\d*$", value_two):
+        return value_one[round(float(value_two))]
+
+    return value_one[value_two]
+
+
 ExpressionOperator: typing.Final[typing.Mapping[str, typing.Callable[[typing.Any, typing.Any], typing.Any]]] = {
-    "+": lambda value_one, value_two: value_one + value_two,
+    "+": add_to,
     "-": lambda value_one, value_two: value_one - value_two,
     "*": lambda value_one, value_two: value_one * value_two,
     "/": lambda value_one, value_two: value_one / value_two,
     "get": lambda value_one, value_two: value_one[value_two],
-    "??": lambda value_one, value_two: value_one if value_one is not None else value_two
+    "??": lambda value_one, value_two: value_one if bool(value_one) else value_two
 }
 """
 Predetermined strings indicating stock functions that may be performed within expressions
@@ -473,7 +583,13 @@ def perform_operation(value_one, operation: str, value_two) -> typing.Any:
     # If the definition of the operation is in the ExpressionOperator, just call that function since it is
     # specially set up for it
     if operation in ExpressionOperator:
-        return ExpressionOperator[operation](value_one, value_two)
+        try:
+            return ExpressionOperator[operation](value_one, value_two)
+        except TypeError as type_error:
+            raise TypeError(
+                f"Cannot perform the operation '{operation}' on '{value_one} ({type(value_one)})' "
+                f"and '{value_two} ({type(value_two)})'"
+            ) from type_error
 
     # If the operation is a member of one of the values, call that member function with the other value
     if hasattr(value_one, operation):
@@ -502,7 +618,7 @@ def perform_operation(value_one, operation: str, value_two) -> typing.Any:
         )
 
 
-def value_to_sequence(value) -> typing.Sequence:
+def value_to_sequence(value) -> typing.List:
     """
     Convert a value into a list of values
 
@@ -513,14 +629,39 @@ def value_to_sequence(value) -> typing.Sequence:
         A list of values based on what was passed in
     """
     if isinstance(value, typing.Sequence) and not isinstance(value, (str, bytes, typing.Mapping)):
-        return value
-
-    if isinstance(value, str) and "|" in value:
-        return value.split("|")
+        sequence = value
+    elif isinstance(value, typing.Iterable) and not isinstance(value, (str, bytes, typing.Mapping)):
+        sequence = [val for val in value]
+    elif isinstance(value, str) and "|" in value:
+        sequence = [val.strip() for val in value.split("|")]
     elif isinstance(value, str) and "," in value:
-        return value.split(",")
+        sequence = [val.strip() for val in value.split(",")]
+    else:
+        sequence = [value]
 
-    return [value]
+    int_strings = [
+        isinstance(val, str) and re.match(r"^-?\d+$", val)
+        for val in sequence
+    ]
+
+    if all(int_strings):
+        return [
+            int(val)
+            for val in sequence
+        ]
+
+    number_strings = [
+        isinstance(val, str) and re.match(r"^-?\d+(\.\d+)?$", val)
+        for val in sequence
+    ]
+
+    if all(number_strings):
+        return [
+            float(val)
+            for val in sequence
+        ]
+
+    return [val for val in sequence]
 
 
 def to_slice(value) -> slice:
@@ -619,18 +760,14 @@ def evaluate_expression(
     value_one = variables.get(value_one, value_one)
     value_two = variables.get(value_two, value_two)
 
+    if isinstance(value_one, typing.Callable):
+        value_one = value_one()
+
+    if isinstance(value_two, typing.Callable):
+        value_two = value_two()
+
     value_one = cast_value(value_one, identified_expression_parts.group("value_one_cast"))
     value_two = cast_value(value_two, identified_expression_parts.group("value_two_cast"))
-
-    value_one_variable_keys = list()
-    while value_one in variables and value_one not in value_one_variable_keys:
-        value_one_variable_keys.append(value_one)
-        value_one = variables[value_one]
-
-    value_two_variable_keys = list()
-    while value_two in variables and value_two not in value_two_variable_keys:
-        value_two_variable_keys.append(value_two)
-        value_two = variables[value_two]
 
     evaluated_expression = perform_operation(value_one=value_one, operation=operation, value_two=value_two)
     return evaluated_expression
@@ -691,7 +828,7 @@ def transform_value(
     # "<% <% 13 + 5 %> + <% 8 - 2 %> %>"
     # and transform it into
     # 24
-    while predicate(collection, key_or_index, latest_value) and not loop_found():
+    while predicate(collection, variables, key_or_index, latest_value) and not loop_found():
         # Run the transform function to evaluate the expression
         newly_transformed_value = transformation(
             variables,
@@ -753,7 +890,7 @@ def create_variables_for_use(
 
     variables_to_use.update({
         key: value
-        for key, value in variables
+        for key, value in variables.items()
         if key not in variables_to_use
     })
 
@@ -894,7 +1031,7 @@ def search_for_and_apply_variables(
                 current_variables=variables_to_use,
                 new_variable_key=new_variable_key
             )
-        elif should_replace_variable(collection=data, key_or_index=key, encountered_value=value):
+        elif should_replace_variable(collection=data, variables=variables_to_use, key_or_index=key, encountered_value=value):
             change_count += transform_value(
                 collection=data,
                 key_or_index=key,
@@ -993,7 +1130,12 @@ def search_for_and_apply_expressions(
     return change_count
 
 
-def process_expressions(data: typing.MutableMapping, variables: typing.Mapping, iterations: int = None) -> int:
+def process_expressions(
+    data: typing.MutableMapping,
+    variables: typing.Mapping = None,
+    iterations: int = None,
+    new_variable_key: str = None
+) -> int:
     """
     Searches for and applies variable values and evaluates expressions several times to ensure that
     nested and changed variables and expressions are correctly evaluated
@@ -1002,18 +1144,33 @@ def process_expressions(data: typing.MutableMapping, variables: typing.Mapping, 
         data: The initial tree to run expressions upon
         variables: Variables that may be used to set values
         iterations: The number of times that
+        new_variable_key: The key to fields that may contain new variables for replacement
 
     Returns:
         The total number of changes that were applied
     """
+    if variables is None:
+        variables = {
+            key: value
+            for key, value in CONSTANT_VARIABLE_VALUES.items()
+        }
+
     if iterations is None:
         iterations = DEFAULT_PROCESS_ITERATION_COUNT
 
     total_change_count = 0
 
     for _ in range(iterations):
-        change_count = search_for_and_apply_variables(data=data, variables=variables)
-        change_count += search_for_and_apply_expressions(data=data, variables=variables)
+        change_count = search_for_and_apply_variables(
+            data=data,
+            variables=variables,
+            new_variable_key=new_variable_key
+        )
+        change_count += search_for_and_apply_expressions(
+            data=data,
+            variables=variables,
+            new_variable_key=new_variable_key
+        )
         total_change_count += change_count
 
         if change_count == 0:

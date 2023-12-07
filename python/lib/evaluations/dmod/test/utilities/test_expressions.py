@@ -133,8 +133,98 @@ class ExpressionTests(TestCase):
     def test_search_for_and_apply_expressions(self):
         self.fail("Test not implemented")
 
-    def test_process_expressions(self):
+    def test_add_to(self):
+        """
+        Test to make sure that the add operation correctly adds values and correctly considers if strings are
+        supposed to be collections or numbers
+        """
+        add = expressions.add_to
+
+        self.assertEqual(add({"one": 1}, {"two": 2}), {"one": 1, "two": 2})
+        self.assertEqual(add('-13', '7'), -6)
+        self.assertEqual(add('-13', 7), -6)
+        self.assertEqual(add(-13, '7'), -6)
+        self.assertEqual(add(-13, 7), -6)
+        self.assertEqual(add({1, 2, 3}, 3), {1, 2, 3})
+        self.assertEqual(add({1, 2, 3}, {3, 4, 5}), {1, 2, 3, 4, 5})
+        self.assertEqual(add([1, 2, 3], 3), [1, 2, 3, 3])
+        self.assertEqual(add([1, 2, 3], '1,2,3,4'), [1, 2, 3, 1, 2, 3, 4])
+        self.assertEqual(add('1, 2, 3, 4', [1, 2, 3]), [1, 2, 3, 4, 1, 2, 3])
+        self.assertEqual(add((1, 2, 3), [1, 2, 3]), [1, 2, 3, 1, 2, 3])
+        self.assertEqual(add([1, 2, 3], [1, 2, 3]), [1, 2, 3, 1, 2, 3])
+        self.assertEqual(add(3, {1, 2, 3}), {1, 2, 3})
+        self.assertEqual(add(True, False), 1)
+        self.assertEqual(add(False, False), 0)
+        self.assertEqual(add(True, True), 2)
+        self.assertEqual(add(1, "one"), "1one")
+        self.assertEqual(add("one", 1), "one1")
+        self.assertEqual(add("one", "1"), "one1")
+
+        self.assertAlmostEqual(add('-13.123', '7'), -6.1229, places=3)
+        self.assertAlmostEqual(add('-13.123', 7), -6.1229, places=3)
+        self.assertAlmostEqual(add(-13.123, '7'), -6.1229, places=3)
+        self.assertAlmostEqual(add(-13.123, 7), -6.1229, places=3)
+
+        self.assertEqual(add('-13', '7.456'), -5.544)
+        self.assertEqual(add('-13', 7.456), -5.544)
+        self.assertEqual(add(-13, '7.456'), -5.544)
+        self.assertEqual(add(-13, 7.456), -5.544)
+
+    def test_getitem(self):
+        """
+        Test the 'get' operation
+        """
         self.fail("Test not implemented")
+
+    def test_process_expressions(self):
+        new_variable_key = "varKey"
+        tree_one = {
+            new_variable_key: {
+                "value_1": 38,
+                "value_2": 2342,
+                "location": "sweden",
+                "list": [1, 2, 3, 4],
+                "boolean value": False,
+                "hex_list": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "A", "B", "C", "D", "E", "F"],
+                "floating point": -23.2342235224,
+                "string list": "1|2|3|4",
+                "nested_values": {
+                    "unit": "cms",
+                    "measurement": -2342.234,
+                    "location": "{{% location %}}",
+                    "tracking": "<% 'boolean value' ?? '13432' %>"
+                }
+            },
+            "country": "{{%  location%}}",
+            "nest": {
+                "time": "<% 'NOW NAIVE' + '-0000'%>",
+                "v": "<% 'value_2' / 'value_1' %>",
+                "t": "<% 'nested_values' get 'tracking' %>"
+            },
+            "collection": [
+                {
+                    "hex": "<% 'hex_list' get '11':int %>",
+                    "number": "<% 'list' get '3'%>",
+                    "fp": "{{% floating point %}}",
+                    "nv": "<% '<% 'nested_values' get 'measurement' %>' / 100.0 %>"
+                },
+                {
+                    "hex": "<% 'hex_list' get '0|3':slice %>",
+                    "number": "<% 'string list' get '2'%>",
+                    "fp": "<% 'floating point' * -12 %>",
+                    "nv": "{{% nested_values %}}"
+                },
+                {
+                    "hex": "<% 'hex_list' get '1,13,5':slice%>",
+                    "number": "<% 'string list' get '0'%>",
+                    "fp": "<% 'floating point' / '7' %>",
+                    "nv": "<% '5' * 'value_1':float%>"
+                }
+            ]
+        }
+
+        changed_values = expressions.process_expressions(data=tree_one, new_variable_key=new_variable_key)
+        self.assertGreater(changed_values, 0)
 
     def test_available_modules(self):
         self.fail("Test not implemented")
