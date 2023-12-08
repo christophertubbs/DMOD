@@ -85,10 +85,10 @@ Examples:
 
 ExpressionPattern = re.compile(
     r"<%\s*"
-    r"'\s*(?P<value_one>[^']+)\s*'\s*"
+    r"`\s*(?P<value_one>[^`]+)\s*`\s*"
     r":?\s*(?P<value_one_cast>(?<=:)\s*[A-aZ-z0-9_.]+)?\s*"
     r"(?P<operator>(-|\+|\*|/|\?\?|[A-Za-z0-9_.]+))\s*"
-    r"'\s*(?P<value_two>[^']+)\s*'\s*"
+    r"`\s*(?P<value_two>[^`]+)\s*`\s*"
     r":?\s*(?P<value_two_cast>(?<=:)\s*[A-aZ-z0-9_.]+)?\s*"
     r"%>"
 )
@@ -116,6 +116,123 @@ Examples:
     >>> ExpressionPattern.search("<% 'one two three four five' get '0 6 2': slice %>")
     True
 """
+
+IntegerPattern = re.compile(r"^-?\d+(?!=\.)$")
+"""A pattern that indicates that a value may be an integer"""
+
+FloatPattern = re.compile(r"^-?\d+\.\d*$")
+"""A pattern that indicates that a value may be a floating point number"""
+
+SequencePattern = re.compile(r"(^[^|\n]+\|[^|\n]+(\|[^|\n]+)*$|^[^,\n]+,[^|\n]+(,[^|\n]+)*$)")
+"""A pattern that matches on either a '|' delimited sequence or a ',' delimited sequence"""
+
+SequenceValuePattern = re.compile(r"(?P<value>([^|]+(?=\|)|\|[^|]+))")
+"""A pattern used to extract values from a string representing a sequence"""
+
+MapPattern = re.compile(
+    r"((\"[^\"]+\"|'[^']+')\s*:\s*(-?\d+(\.\d*)?|true|false|null|'[^']*'|\"[^\"]*\")\s*)\s*"
+    r"(,\s*((\"[^\"]+\"|'[^']+')\s*:\s*(-?\d+(\.\d*)?|true|false|null|'[^']*'|\"[^\"]*\")\s*)\s*)*"
+)
+"""
+A regular expression that matches on values that look like dictionaries
+"""
+
+KeyValuePattern = re.compile(
+    r"(?P<key>('[^']+'|\"[^\"]+\"))\s*:\s*"
+    r"(?P<value>(null|false|true|-?\d+(\.\d*)?|'[^']*|\"[^\"]*\"))"
+    r"|"
+    r"(?P<nested_key>('[^']+'|\"[^\"]+\"))\s*:\s*"
+    r"(?P<nested_value>\{[^}]+})"
+)
+"""
+A regular expression that identifies keys and values from a map
+
+Values for 'nested_key' and 'nested_value' indicate that the value captured in 'nested_value' needs to be iterated upon
+"""
+
+
+def interpret_map(map_string: str) -> typing.Dict[str, typing.Any]:
+    """
+    Read through a string and try to convert it into a typed map
+
+    Examples:
+        >>> interpret_map('{"one":  1, "two":"2"    ," 3": true, "4  ": null, "   5": {"a": 1, "b   ": "no"}}')
+        {
+            "one": 1,
+            "two": 2,
+            "3": True,
+            "4": None,
+            "5": {
+                "a": 1,
+                "b": "no"
+            }
+        }
+        >>> interpret_map("{'one':  1, 'two':'2'    ,' 3': true, '4  ': null, '   5': {'a': 1, 'b   ': 'no'}}")
+        {
+            "one": 1,
+            "two": 2,
+            "3": True,
+            "4": None,
+            "5": {
+                "a": 1,
+                "b": "no"
+            }
+        }
+        >>> interpret_map('"one":  1, "two":"2"    ," 3": true, "4  ": null, "   5": {"a": 1, "b   ": "no"}')
+        {
+            "one": 1,
+            "two": 2,
+            "3": True,
+            "4": None,
+            "5": {
+                "a": 1,
+                "b": "no"
+            }
+        }
+        >>> interpret_map('"one":  1 "two":"2"    " 3": true "4  ": null "   5": {"a": 1 "b   ": "no"}')
+        {
+            "one": 1,
+            "two": 2,
+            "3": True,
+            "4": None,
+            "5": {
+                "a": 1,
+                "b": "no"
+            }
+        }
+
+    Args:
+        map_string: A string representing a map
+
+    Returns:
+        A dictionary containing the data conveyed by the map
+    """
+    map_string = map_string.strip().strip('`').strip()
+    new_map: typing.Dict[str, typing.Any] = {}
+
+    for match in KeyValuePattern.finditer(map_string):
+        if match.group("key") and match.group("value"):
+            key = match.group("key").strip().strip('"').strip("'").strip()
+            value = match.group("value").strip().strip("'").strip('"').strip()
+
+            if value.lower() == 'true':
+                value = True
+            elif value.lower() == 'false':
+                value = False
+            elif value.lower() == 'null':
+                value = None
+            elif IntegerPattern.match(value):
+                value = int(value)
+            elif FloatPattern.match(value):
+                value = float(value)
+
+            new_map[key] = value
+        else:
+            key = match.group("nested_key").strip().strip("'").strip('"').strip()
+            value = interpret_map(match.group("nested_value"))
+            new_map[key] = value
+
+    return new_map
 
 
 WalkableObject = typing.Union[typing.MutableSequence, typing.MutableMapping[str, typing.Any]]
@@ -278,19 +395,19 @@ def extract_expression(value: str) -> typing.Optional[ExtractedExpression]:
     if not matching_expression:
         return None
 
-    value_one = matching_expression.group("value_one").strip().strip("'").strip()
-    value_two = matching_expression.group("value_two").strip().strip("'").strip()
-    operator = matching_expression.group("operator").strip().strip("'").strip()
+    value_one = matching_expression.group("value_one").strip().strip("`").strip()
+    value_two = matching_expression.group("value_two").strip().strip("`").strip()
+    operator = matching_expression.group("operator").strip().strip("`").strip()
 
     value_one_cast = matching_expression.group("value_one_cast")
 
     if isinstance(value_one_cast, str):
-        value_one_cast = value_one_cast.strip().strip("'").strip()
+        value_one_cast = value_one_cast.strip().strip("`").strip()
 
     value_two_cast = matching_expression.group("value_two_cast")
 
     if isinstance(value_two_cast, str):
-        value_two_cast = value_two_cast.strip().strip("'").strip()
+        value_two_cast = value_two_cast.strip().strip("`").strip()
 
     return ExtractedExpression(
         value_one=value_one,
@@ -441,7 +558,74 @@ def transform_sequence(
     return change_count
 
 
+def multiply(value_one, value_two):
+    """
+    A broad multiplication mechanism that may perform a multiplication operation upon varying types, such as `list` * `str`
+
+    Args:
+        value_one: The first value
+        value_two: The value to multiply the first by
+
+    Returns:
+        The result of the multiplication operation
+    """
+    if isinstance(value_one, str):
+        value_one = value_one.strip().strip("'").strip('"').strip()
+
+    if isinstance(value_two, str):
+        value_two = value_one.strip().strip("'").strip('"').strip()
+
+    if not isinstance(value_one, (int, float)) and isinstance(value_one, str):
+        if IntegerPattern.match(value_one):
+            value_one = int(value_one)
+        elif FloatPattern.match(value_one):
+            value_one = float(value_one)
+
+    if not isinstance(value_two, (int, float) and isinstance(value_two, str)):
+        if IntegerPattern.match(value_two):
+            value_two = int(value_two)
+        elif FloatPattern.match(value_two):
+            value_two = float(value_two)
+
+    if not (isinstance(value_one, (int, float)) or isinstance(value_two, (int, float))):
+        raise TypeError(
+            f"Cannot multiply '{value_one}: ({type(value_one)})' by '{value_two}: ({type(value_two)})' - "
+            f"at least one of the values must be able to be considered either a float or an integer"
+        )
+
+    if isinstance(value_one, (int, float)) and isinstance(value_two, (int, float)):
+        return value_one * value_two
+
+    multiplier: typing.Union[int, float] = value_one if isinstance(value_one, (int, float)) else value_two
+    multiplyee = value_two if isinstance(value_one, (int, float)) else value_one
+
+    if isinstance(multiplier, float):
+        raise TypeError(
+            f"Cannot multiply {multiplyee} by {multiplier} - cannot multiply a {type(multiplyee)} by a float"
+        )
+
+    if isinstance(multiplyee, str) and SequencePattern.search(multiplyee):
+        multiplyee = value_to_sequence(multiplyee)
+
+    if not isinstance(multiplyee, (str, typing.Sequence)) or isinstance(multiplyee, typing.Mapping):
+        raise TypeError(
+            f"Cannot perform multiplication on '{multiplyee}'"
+        )
+
+    return multiplyee * multiplier
+
+
 def add_to(value_one, value_two):
+    """
+    A broad addition mechanism that may perform an addition operation upon varying types, such as `list` + `int`
+
+    Args:
+        value_one: The first value
+        value_two: The value to add to the first value
+
+    Returns:
+        The result of the additive operation
+    """
     if isinstance(value_one, typing.Set):
         return {val for val in value_one}.union(value_to_sequence(value_two))
 
@@ -528,8 +712,26 @@ def add_to(value_one, value_two):
 
 
 def get_item(value_one, value_two):
-    if isinstance(value_one, typing.Mapping):
+    """
+    Get an item from value one by the key or index represented by value two
+
+    Args:
+        value_one: The collection to retrieve a value from
+        value_two: The index or key of the value of interest
+
+    Returns:
+        The item at the given index
+    """
+    if isinstance(value_one, str) and MapPattern.search(value_one):
+        value_one = interpret_map(value_one)
+
+    if isinstance(value_one, typing.Mapping) and value_two in value_one:
         return value_one[value_two]
+    elif isinstance(value_one, typing.Mapping) and str(value_two) in value_one:
+        return value_one[str(value_two)]
+
+    if isinstance(value_one, str) and SequencePattern.search(value_one):
+        value_one = value_to_sequence(value_one)
 
     if not isinstance(value_one, (str, typing.Sequence)) and isinstance(value_one, typing.Iterable):
         value_one = value_to_sequence(value_one)
@@ -542,10 +744,10 @@ def get_item(value_one, value_two):
     if isinstance(value_two, float):
         return value_one[round(value_two)]
 
-    if isinstance(value_two, str) and re.match(r"^-?\d+$", value_two):
+    if isinstance(value_two, str) and IntegerPattern.match(value_two):
         return value_one[int(value_two)]
 
-    if isinstance(value_two, str) and re.match(r"^-?\d+\.\d*$", value_two):
+    if isinstance(value_two, str) and FloatPattern.match(value_two):
         return value_one[round(float(value_two))]
 
     return value_one[value_two]
@@ -556,7 +758,7 @@ ExpressionOperator: typing.Final[typing.Mapping[str, typing.Callable[[typing.Any
     "-": lambda value_one, value_two: value_one - value_two,
     "*": lambda value_one, value_two: value_one * value_two,
     "/": lambda value_one, value_two: value_one / value_two,
-    "get": lambda value_one, value_two: value_one[value_two],
+    "get": lambda value_one, value_two: get_item(value_one, value_two),
     "??": lambda value_one, value_two: value_one if bool(value_one) else value_two
 }
 """
@@ -633,9 +835,9 @@ def value_to_sequence(value) -> typing.List:
     elif isinstance(value, typing.Iterable) and not isinstance(value, (str, bytes, typing.Mapping)):
         sequence = [val for val in value]
     elif isinstance(value, str) and "|" in value:
-        sequence = [val.strip() for val in value.split("|")]
+        sequence = [val.strip().strip("'").strip('"') for val in value.split("|")]
     elif isinstance(value, str) and "," in value:
-        sequence = [val.strip() for val in value.split(",")]
+        sequence = [val.strip().strip("'").strip('"') for val in value.split(",")]
     else:
         sequence = [value]
 

@@ -43,30 +43,30 @@ class ExpressionTests(TestCase):
         Tests to ensure that the `ExpressionPattern` regular expression works as intended
         """
         values_with_expressions = {
-            " <% '5' + '6' %>": expressions.ExtractedExpression(
+            " <% `5` + `6` %>": expressions.ExtractedExpression(
                 value_one="5",
                 value_two="6",
                 operator="+"
             ),
-            "<%'5'-'6'%>": expressions.ExtractedExpression(
+            "<%`5`-`6`%>": expressions.ExtractedExpression(
                 value_one="5",
                 value_two="6",
                 operator="-"
             ),
-            "<% 'one two three four': list      get '5' %>  ": expressions.ExtractedExpression(
+            "<% `one two three four`: list      get `5` %>  ": expressions.ExtractedExpression(
                 value_one="one two three four",
                 value_two="5",
                 operator="get",
                 value_one_cast="list"
             ),
-            "<% '-2342342234.23':path.to.some_class path.to.some.operation 'sdfosdf':slice%>": expressions.ExtractedExpression(
+            "<% `-2342342234.23`:path.to.some_class path.to.some.operation `sdfosdf`:slice%>": expressions.ExtractedExpression(
                 value_one='-2342342234.23',
                 value_two='sdfosdf',
                 operator="path.to.some.operation",
                 value_one_cast="path.to.some_class",
                 value_two_cast="slice"
             ),
-            "<% 'abc':<% 'types_of values' get    '3':int%> ?? 'True':bool%>": expressions.ExtractedExpression(
+            "<% `abc`:<% `types_of values` get    `3`:int%> ?? `True`:bool%>": expressions.ExtractedExpression(
                 value_one="types_of values",
                 value_two="3",
                 operator="get",
@@ -75,14 +75,15 @@ class ExpressionTests(TestCase):
         }
 
         values_without_expressions = [
-            " <% '5' + '6 %>",
+            " <% 5` + `6 %>",
+            "<% '5' + '6' %>",
             " <% 5 + 6 %>",
-            " <% '5'  '6' %>",
-            "<% 'abc':<% 'types_of values' get    '3':int> ?? 'True':bool%>",
-            "<% '-2342'342234.23':path.to.some_class path.to.some.operation 'sdfosdf':slice%>",
-            "<% '-2342342234.23':path.to.some_class path.to.some.operation 'sdfosdf':slic e%>",
-            "<% '-2342342234.23':path.to.some_class path.to.some.operation 'sdfosdf':slice>"
-            "<% '-2342342234.23':path.to.some_class path.to.some.operation 'sdfosdf':slice"
+            " <% `5`  `6` %>",
+            "<% `abc`:<% `types_of values` get    `3`:int> ?? `True`:bool%>",
+            "<% `-2342`342234.23`:path.to.some_class path.to.some.operation `sdfosdf`:slice%>",
+            "<% `-2342342234.23`:path.to.some_class path.to.some.operation `sdfosdf`:slic e%>",
+            "<% `-2342342234.23`:path.to.some_class path.to.some.operation 'sdfosdf':slice>"
+            "<% `-2342342234.23`:path.to.some_class path.to.some.operation `sdfosdf`:slice"
         ]
 
         for expression, expected_value in values_with_expressions.items():
@@ -90,6 +91,124 @@ class ExpressionTests(TestCase):
             self.assertEqual(extracted_values, expected_value)
 
         self.assertTrue(not any(map(expressions.extract_expression, values_without_expressions)))
+
+    def test_interpret_map(self):
+        same_maps = [
+            '{'
+            '"one": 1, '
+            '"two": -2, '
+            '"three": 3.234, '
+            '"four": -4.2342, '
+            '"five": false, '
+            '"six": true, '
+            '"seven": null, '
+            '"eight":  {'
+            '"one": 1, '
+            '"two": -2, '
+            '"three": 3.234, '
+            '"four": -4.2342, '
+            '"five": false, '
+            '"six": true, '
+            '"seven": null'
+            '}'
+            '}',
+            '"one": 1, '
+            '"two": -2, '
+            '"three": 3.234, '
+            '"four": -4.2342, '
+            '"five": false, '
+            '"six": true, '
+            '"seven": null, '
+            '"eight":  {'
+            '"one": 1, '
+            '"two": -2, '
+            '"three": 3.234, '
+            '"four": -4.2342, '
+            '"five": false, '
+            '"six": true, '
+            '"seven": null'
+            '}',
+            '{'
+            '"one": 1 '
+            '"two": -2 '
+            '"three": 3.234 '
+            '"four": -4.2342 '
+            '"five": false '
+            '"six": true '
+            '"seven": null '
+            '"eight":  {'
+            '"one": 1 '
+            '"two": -2 '
+            '"three": 3.234 '
+            '"four": -4.2342 '
+            '"five": false '
+            '"six": true '
+            '"seven": null'
+            '}'
+            '}',
+            '"one": 1 '
+            '"two": -2 '
+            '"three":   3.234 '
+            '"four": -4.2342 '
+            '"five":        false '
+            '"six": true '
+            '"seven": null '
+            '"eight":   {'
+            '"one":     1        '
+            '"two": -2 '
+            '"three": 3.234 '
+            '"four": -4.2342 '
+            ' "five": false '
+            '"six":     true '
+            '"seven":   null'
+            '}',
+            '{'
+            "'one': 1, "
+            "'two': -2, "
+            "'three': 3.234, "
+            "'four': -4.2342, "
+            '"five": false, '
+            '"six": true, '
+            '"seven": null, '
+            "'eight':  {"
+            '"one": 1, '
+            '"two": -2, '
+            "'three': 3.234, "
+            '"four": -4.2342, '
+            '"five": false, '
+            '"six": true, '
+            '"seven": null'
+            '}'
+            '}',
+        ]
+
+        expected_map = {
+            "one": 1,
+            "two": -2,
+            "three": 3.234,
+            "four": -4.2342,
+            "five": False,
+            "six": True,
+            "seven": None,
+            "eight": {
+                "one": 1,
+                "two": -2,
+                "three": 3.234,
+                "four": -4.2342,
+                "five": False,
+                "six": True,
+                "seven": None,
+            }
+        }
+
+        for map_string in same_maps:
+            generated_map = expressions.interpret_map(map_string=map_string)
+            self.assertEqual(expected_map, generated_map)
+
+        self.assertEqual(
+            expressions.interpret_map(map_string='{"one": 1, "2": "two"}'),
+            {"one": 1, "2": "two"}
+        )
 
     def test_transform_tree(self):
         self.fail("Test not implemented")
@@ -174,7 +293,54 @@ class ExpressionTests(TestCase):
         """
         Test the 'get' operation
         """
-        self.fail("Test not implemented")
+        self.assertEqual(expressions.get_item({"one": 1, 2: "two"}, 2), "two")
+        self.assertEqual(expressions.get_item({"one": 1, '2': "two"}, 2), "two")
+        self.assertEqual(expressions.get_item({"one": 1, '2': "two"}, '2'), "two")
+        self.assertEqual(expressions.get_item('{"one": 1, "2": "two"}', 2), "two")
+        self.assertEqual(expressions.get_item('{"one": 1, "2": "two"}', '2'), "two")
+        self.assertEqual(expressions.get_item([1, "two"], '1'), "two")
+        self.assertEqual(expressions.get_item([1, "two"], 1), "two")
+        self.assertEqual(expressions.get_item([1, "two"], 1.15215148), "two")
+        self.assertEqual(expressions.get_item('1, "two"', '1'), "two")
+        self.assertEqual(expressions.get_item('1, "two"', 1), "two")
+        self.assertEqual(expressions.get_item('1, "two"', 1.15215148), "two")
+        self.assertEqual(expressions.get_item('1 | "two"', '1'), "two")
+        self.assertEqual(expressions.get_item('1 |"two"', 1), "two")
+        self.assertEqual(expressions.get_item('1| "two"', 1.15215148), "two")
+
+    def test_multiply(self):
+        multiply = expressions.multiply
+        self.assertEqual(multiply("test", 2), "testtest")
+        self.assertEqual(multiply("test", '2'), "testtest")
+        self.assertEqual(multiply(5, 5), 25)
+        self.assertEqual(multiply('5', 5), 25)
+        self.assertEqual(multiply(5, '5'), 25)
+        self.assertEqual(multiply('5', '5'), 25)
+        self.assertEqual(multiply('0.5', -10), -5)
+        self.assertEqual(multiply('0.5', '-10'), -5)
+        self.assertEqual(multiply('-0.5', '-10'), 5)
+        self.assertEqual(multiply("1,   2, 3,   ,4,5   , 6", 2), [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6])
+
+    def test_expressionoperators(self):
+        operators = expressions.ExpressionOperator
+        self.assertEqual(operators["+"](1, 1), 2)
+        self.assertEqual(operators["+"](True, False), 1)
+        self.assertEqual(operators["+"]("one", "two"), "onetwo")
+        self.assertEqual(operators['get']([1, 2, 3, 4], 1), 2)
+        self.assertEqual(operators['get']({'one': 1, "two": 2}, 'two'), 2)
+        self.assertEqual(operators['get']("{'one': 1, \"two\": 2}", 'two'), 2)
+        self.assertEqual(operators['get']([1, 2, 3, 4], "1"), 2)
+        self.assertEqual(operators['get']({'one': 1, "two": 2}, 'two'), 2)
+        self.assertEqual(operators["get"]("one", 1), 'n')
+        self.assertEqual(operators["get"]("one,two,three", 2), "three")
+        self.assertEqual(operators['get']("one,two,three", '2'), "three")
+        self.assertEqual(operators["??"]("", 5), 5)
+        self.assertEqual(operators["??"](5, ""), 5)
+        self.assertEqual(operators["??"](5, 234234), 5)
+        self.assertEqual(operators['??']([], 0), 0)
+        self.assertEqual(operators['??'](None, []), [])
+        self.assertEqual(operators['??']([], None), None)
+        self.assertEqual(operators['??'](0, []), [])
 
     def test_process_expressions(self):
         new_variable_key = "varKey"
@@ -192,33 +358,33 @@ class ExpressionTests(TestCase):
                     "unit": "cms",
                     "measurement": -2342.234,
                     "location": "{{% location %}}",
-                    "tracking": "<% 'boolean value' ?? '13432' %>"
+                    "tracking": "<% `boolean value` ?? `13432` %>"
                 }
             },
             "country": "{{%  location%}}",
             "nest": {
-                "time": "<% 'NOW NAIVE' + '-0000'%>",
-                "v": "<% 'value_2' / 'value_1' %>",
-                "t": "<% 'nested_values' get 'tracking' %>"
+                "time": "<% `NOW NAIVE` + `-0000`%>",
+                "v": "<% `value_2` / `value_1` %>",
+                "t": "<% `nested_values` get `tracking` %>"
             },
             "collection": [
                 {
-                    "hex": "<% 'hex_list' get '11':int %>",
-                    "number": "<% 'list' get '3'%>",
+                    "hex": "<% `hex_list` get `11`:int %>",
+                    "number": "<% `list` get `3`%>",
                     "fp": "{{% floating point %}}",
-                    "nv": "<% '<% 'nested_values' get 'measurement' %>' / 100.0 %>"
+                    "nv": "<% `<% `nested_values` get `measurement` %>` / `100.0` %>"
                 },
                 {
-                    "hex": "<% 'hex_list' get '0|3':slice %>",
-                    "number": "<% 'string list' get '2'%>",
-                    "fp": "<% 'floating point' * -12 %>",
+                    "hex": "<% `hex_list` get `0|3`:slice %>",
+                    "number": "<% `string list` get `2`%>",
+                    "fp": "<% `floating point` * `-12` %>",
                     "nv": "{{% nested_values %}}"
                 },
                 {
-                    "hex": "<% 'hex_list' get '1,13,5':slice%>",
-                    "number": "<% 'string list' get '0'%>",
-                    "fp": "<% 'floating point' / '7' %>",
-                    "nv": "<% '5' * 'value_1':float%>"
+                    "hex": "<% `hex_list` get `1,13,5`:slice%>",
+                    "number": "<% `string list` get '0'%>",
+                    "fp": "<% `floating point` / `7` %>",
+                    "nv": "<% `5` * `value_1`:float%>"
                 }
             ]
         }
