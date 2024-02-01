@@ -83,6 +83,14 @@ class CancelResults:
         """
         return self.__message
 
+    def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return False
+
+        return self.task_name == other.task_name \
+            and self.cancelled == other.cancelled \
+            and self.message == other.message
+
 
 async def wait_on_task(task: asyncio.Task, wait_seconds: int = None, maximum_times_to_poll: int = None) -> bool:
     """

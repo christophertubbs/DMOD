@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+import multiprocessing
 import typing
 import os
 import abc
@@ -6,8 +10,10 @@ import inspect
 import enum
 import logging
 import traceback
+from datetime import datetime
+from queue import Empty
 
-from collections import abc as abstract_collections
+from dmod.core.restorable import Restorable
 
 MESSAGE = typing.Union[bytes, str, typing.Dict[str, typing.Any], typing.Sequence, bool, int, float]
 MESSAGE_HANDLER = typing.Callable[[MESSAGE], typing.NoReturn]
@@ -32,18 +38,22 @@ class Verbosity(enum.IntEnum):
     """Emit everything, including raw data"""
 
 
-class Communicator(abc.ABC):
+class Communicator(Restorable):
     def __init__(
         self,
         communicator_id: str,
         verbosity: Verbosity = None,
         on_receive: typing.Union[MESSAGE_HANDLER, typing.Sequence[MESSAGE_HANDLER]] = None,
         handlers: typing.Dict[str, typing.Union[MESSAGE_HANDLER, typing.Sequence[MESSAGE_HANDLER]]] = None,
+        include_timestamp: bool = None,
+        timestamp_format: str = None,
         **kwargs
     ):
         self.__communicator_id = communicator_id
         self._handlers = collections.defaultdict(list)
         self._verbosity = verbosity or Verbosity.QUIET
+        self.__include_timestamp = include_timestamp if include_timestamp is not None else False
+        self.__timestamp_format = timestamp_format or "%Y-%m-%d %I:%M:%S %p %Z"
 
         if handlers:
             if not isinstance(handlers, typing.Mapping):
@@ -98,41 +108,120 @@ class Communicator(abc.ABC):
                 f"communicator cannot be used as a function"
             )
 
+    def handle_event(self, event_name: str, message):
+        for handler in self._handlers.get(event_name, []):
+            try:
+                handler(message)
+            except Exception as error:
+                error_message = f"Could not handle a message event for '{event_name}' through '{handler}'. " \
+                                f"Message:{os.linesep}{message}"
+                logging.error(error_message, error)
+
     @abc.abstractmethod
     def error(self, message: str, exception: Exception = None, verbosity: Verbosity = None, publish: bool = None):
-        pass
+        """
+        Publishes an error to the communicator's set of error messages
 
-    @abc.abstractmethod
-    def info(self, message: str, verbosity: Verbosity = None, publish: bool = None):
-        pass
-
-    @abc.abstractmethod
-    def read_errors(self) -> typing.Iterable[str]:
-        pass
-
-    @abc.abstractmethod
-    def read_info(self) -> typing.Iterable[str]:
-        pass
-
-    @abc.abstractmethod
-    def _validate(self) -> typing.Sequence[str]:
+        Args:
+            message: The error message
+            exception: An exception that caused the error
+            verbosity: The significance of the message. If given, the message will only be recorded if the
+                        vebosity matches or exceeds the communicator's verbosity
+            publish: Whether to write the message to the channel
+        """
         pass
 
     @abc.abstractmethod
     def write(self, reason: REASON_TO_WRITE, data: dict):
+        """
+        Writes data to the communicator
+
+        Takes the form of:
+
+        {
+            "event": reason,
+            "time": YYYY-mm-dd HH:MMz,
+            "data": json string
+        }
+
+        Args:
+            reason: The reason for data being written to the channel
+            data: The data to write to the channel; will be converted to a string
+        """
+        ...
+
+    @abc.abstractmethod
+    def info(self, message: str, verbosity: Verbosity = None, publish: bool = None):
+        """
+        Publishes a message to the communicator's set of basic information.
+
+        Data will look like the following when published to the channel:
+
+            {
+                "event": "info",
+
+                "time": YYYY-mm-dd HH:MM z,
+
+                "data": {
+                    "info": message
+                }
+            }
+
+        Args:
+            message: The message to record
+            verbosity: The significance of the message. If given, the message will only be recorded if the
+                        verbosity matches or exceeds the communicator's verbosity
+            publish: Whether the message should be published to the channel
+        """
+        pass
+
+    @abc.abstractmethod
+    def read_errors(self) -> typing.Iterable[str]:
+        """
+        Returns:
+            All recorded error messages for this evaluation so far
+        """
+        pass
+
+    @abc.abstractmethod
+    def read_info(self) -> typing.Iterable[str]:
+        """
+        Returns:
+            All basic notifications for this evaluation so far
+        """
+        pass
+
+    @abc.abstractmethod
+    def _validate(self) -> typing.Sequence[str]:
+        """
+        Returns:
+            A list of issues with this communicator as constructed
+        """
         pass
 
     @abc.abstractmethod
     def read(self) -> typing.Any:
+        """
+        Wait the communicator's set timeout for a message
+
+        Returns:
+            A deserialized message if one was received, Nothing otherwise
+        """
         pass
 
-    @abc.abstractmethod
-    def update(self, **kwargs):
-        pass
+    @property
+    def include_timestamp(self) -> bool:
+        """
+        Whether to include the timestamp in communicated messages
+        """
+        return self.__include_timestamp
 
-    @abc.abstractmethod
-    def sunset(self, seconds: float = None):
-        pass
+    @property
+    def timestamp_format(self) -> str:
+        """
+        The format for timestamps in added to messages
+        """
+        return self.__timestamp_format
 
     @property
     def communicator_id(self) -> str:
@@ -147,10 +236,351 @@ class Communicator(abc.ABC):
         return self._verbosity
 
 
-class CommunicatorGroup(abstract_collections.Mapping):
+class QueueCommunicator(Communicator):
+    def write(self, reason: REASON_TO_WRITE, data: dict):
+        message = {
+            "event": reason,
+            "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M%z"),
+            "data": data,
+        }
+        self.info(message=json.dumps(message), include_timestamp=False)
+
+    def get_package_arguments(self) -> typing.List:
+        return []
+
+    def get_package_keyword_arguments(self) -> typing.Dict[str, typing.Any]:
+        logging.warning(
+            f"Getting package data from a '{self.__class__.__name__}' for ID: '{self.communicator_id}'. "
+            f"This will not connect back to this when restored. "
+            f"Avoid using this in any instance other than testing."
+        )
+        return {
+            "communicator_id": self.communicator_id,
+            "verbosity": self.verbosity,
+            "information": self.get_info(),
+            "errors": self.get_errors(),
+            "maximum_size": self.__maximum_size,
+            "operation_wait_seconds": self.__wait_seconds
+        }
+
+    def __init__(
+        self,
+        communicator_id: str,
+        verbosity: Verbosity = None,
+        handlers: typing.Dict[str, typing.Union[MESSAGE_HANDLER, typing.Sequence[MESSAGE_HANDLER]]] = None,
+        information: typing.Iterable[str] = None,
+        errors: typing.Iterable[str] = None,
+        maximum_size: int = None,
+        operation_wait_seconds: float = None,
+        **kwargs
+    ):
+        if not isinstance(maximum_size, int) and isinstance(maximum_size, typing.SupportsFloat):
+            maximum_size = int(float(maximum_size))
+        if maximum_size is None or not isinstance(maximum_size, int) or maximum_size < 0:
+            maximum_size = 0
+
+        self.__lock = multiprocessing.RLock()
+        self.__maximum_size = maximum_size
+        self.__information = multiprocessing.Queue(maxsize=maximum_size)
+        self.__errors = multiprocessing.Queue(maxsize=maximum_size)
+        self.__wait_seconds = operation_wait_seconds if isinstance(operation_wait_seconds, (float, int)) else 5
+        self.__information_count = 0
+        self.__error_count = 0
+
+        with self.__lock:
+            for message in information or []:
+                self.__information.put(message)
+                self.__information_count += 1
+
+        with self.__lock:
+            for error in errors or []:
+                self.__errors.put(error)
+                self.__error_count += 1
+
+        super().__init__(communicator_id=communicator_id, verbosity=verbosity, handlers=handlers, **kwargs)
+
+    @property
+    def error_count(self) -> int:
+        with self.__lock:
+            return self.__error_count
+
+    @property
+    def information_count(self) -> int:
+        with self.__lock:
+            return self.__information_count
+
+    def error(
+        self,
+        message: str,
+        exception: Exception = None,
+        verbosity: Verbosity = None,
+        publish: bool = None
+    ):
+        """
+        Publishes an error to the communicator's set of error messages
+
+        Args:
+            message: The error message
+            exception: An exception that caused the error
+            verbosity: The significance of the message. If given, the message will only be recorded if the
+                        verbosity matches or exceeds the communicator's verbosity
+            publish: Whether to write the message to the channel
+        """
+        if verbosity and self.verbosity < verbosity:
+            return
+
+        if self.include_timestamp:
+            timestamp = datetime.now().astimezone().strftime(self.timestamp_format)
+            message = f"[{timestamp}] {message}"
+
+        if exception:
+            message += f"{os.linesep}{traceback.format_exc()}"
+
+        put_try_count = 0
+        max_attempts = 10
+
+        logging.info(f"Adding an error. There are currently {self.error_count} items in the queue")
+
+        with self.__lock:
+            while put_try_count < max_attempts:
+                try:
+                    while self.__errors.full():
+                        logging.info("There are too many entries in the error log. Trying to remove the oldest entry")
+                        try:
+                            last_message = self.__errors.get()
+                            self.__error_count -= 1
+                            logging.info(f"Removed: {last_message}")
+                            self.handle_event("expire", last_message)
+                        except BaseException as exception:
+                            logging.error(f"Could not remove an item from the error log: {exception}")
+                    self.__errors.put(message, block=True, timeout=self.__wait_seconds)
+                    self.__error_count += 1
+                except BaseException as exception:
+                    put_try_count += 1
+
+                    if put_try_count >= max_attempts:
+                        raise Exception(f"Could not communicate error: {message}") from exception
+
+                    logging.error(f"Failed to add an item into the error log: {exception}. Trying again.")
+                else:
+                    logging.info(f"Added '{message}' to the error log")
+                    break
+
+        if put_try_count >= max_attempts:
+            raise Exception(f"Could not communicate error: {message} - ran out of attempts")
+
+        if publish:
+            self.handle_event("error", message)
+        else:
+            logging.info(f"Not publishing extra information about the newly added '{message}' error")
+
+    def info(self, message: str, verbosity: Verbosity = None, publish: bool = None, include_timestamp: bool = None):
+        """
+        Publishes a message to the communicator's set of basic information.
+
+        Args:
+            message: The message to record
+            verbosity: The significance of the message. If given, the message will only be recorded if the
+                        verbosity matches or exceeds the communicator's verbosity
+            publish: Whether the message should be published to the channel
+        """
+        if verbosity and self.verbosity < verbosity:
+            return
+
+        if include_timestamp is None:
+            include_timestamp = self.include_timestamp
+
+        if include_timestamp:
+            timestamp = datetime.now().astimezone().strftime(self.timestamp_format)
+            message = f"[{timestamp}] {message}"
+
+        put_try_count = 0
+        max_attempts = 10
+
+        logging.info(f"Adding a message. There are currently {self.information_count} items in the queue")
+
+        with self.__lock:
+            while put_try_count < max_attempts:
+                try:
+                    while self.__information.full():
+                        logging.info(
+                            "There are too many entries in the information log. Trying to remove the oldest entry"
+                        )
+                        try:
+                            last_message = self.__information.get()
+                            self.__information_count -= 1
+                            logging.info(f"Removed: {last_message}")
+                            self.handle_event("expire", last_message)
+                        except BaseException as exception:
+                            logging.error(f"Could not remove an item from the information log: {exception}")
+                    self.__information.put(message, block=True, timeout=self.__wait_seconds)
+                    self.__information_count += 1
+                except BaseException as exception:
+                    put_try_count += 1
+
+                    if put_try_count >= max_attempts:
+                        raise Exception(f"Could not communicate information: {message}") from exception
+
+                    logging.error(f"Failed to add an item into the information log: {exception}. Trying again.")
+                else:
+                    logging.info(f"Added '{message}' to the information log")
+                    break
+
+        if publish:
+            self.handle_event("info", message)
+        else:
+            logging.info(f"Not publishing extra information about the newly added '{message}' message")
+
+    def get_errors(self, enforce_length: bool = None) -> typing.Iterable[str]:
+        enforce_length = bool(enforce_length) if enforce_length is not None else enforce_length
+
+        errors = []
+
+        with self.__lock:
+            while not self.__errors.empty():
+                error = None
+                try:
+                    error = self.__errors.get(block=True, timeout=self.__wait_seconds)
+                    self.__error_count -= 1
+                    logging.info(f"Read {error} from the error log")
+                    errors.append(error)
+                except Empty:
+                    logging.info(f"There are no more errors to look for")
+                    break
+                except BaseException as exception:
+                    logging.info(f"Could not get an error from the log: {exception}")
+                    if error:
+                        logging.info(f"Trying to put an error back: {error}")
+                        try:
+                            self.error(error)
+                        except:
+                            logging.info(f"Could not put {error} back into the error log")
+
+                    raise exception
+
+            for error in errors:
+                logging.info(f"Putting {error} back into the error log")
+                self.__errors.put(error, block=True, timeout=self.__wait_seconds)
+                self.__error_count += 1
+
+            if enforce_length:
+                assert len(errors) == self.error_count
+
+        return errors
+
+    def get_info(self, enforce_length: bool = None) -> typing.Iterable[str]:
+        enforce_length = bool(enforce_length) if enforce_length is not None else enforce_length
+
+        messages = []
+
+        with self.__lock:
+            while not self.__information.empty():
+                message = None
+                try:
+                    message = self.__information.get(block=True, timeout=self.__wait_seconds)
+                    self.__information_count -= 1
+                    messages.append(message)
+                except TimeoutError:
+                    continue
+                except Empty:
+                    break
+                except BaseException as exception:
+                    if message:
+                        try:
+                            self.info(message)
+                        except:
+                            pass
+                    raise exception
+
+            for message in messages:
+                self.__information.put(message, block=True, timeout=self.__wait_seconds)
+                self.__information_count += 1
+
+            if enforce_length:
+                assert len(messages) == self.information_count
+
+        return messages
+
+    def read_errors(self) -> typing.Iterable[str]:
+        errors = []
+
+        while not self.__errors.empty():
+            error = None
+            try:
+                error = self.__errors.get(block=True, timeout=self.__wait_seconds)
+                errors.append(error)
+            except TimeoutError:
+                continue
+            except Empty:
+                break
+            except BaseException as exception:
+                if error:
+                    try:
+                        self.error(error)
+                    except:
+                        pass
+                raise exception
+
+        for error in errors:
+            self.handle_event("read_error", error)
+
+        return errors
+
+    def read_info(self) -> typing.Iterable[str]:
+        info = []
+
+        while not self.__information.empty():
+            try:
+                info.append(self.__information.get(block=True, timeout=self.__wait_seconds))
+            except Empty:
+                break
+
+        return info
+
+    def _validate(self) -> typing.Sequence[str]:
+        pass
+
+    def read(self) -> str:
+        return self.__information.get(block=True)
+
+    def __hash__(self):
+        info = sorted(self.get_info())
+        errors = sorted(self.get_errors())
+        return hash(tuple([
+            self.communicator_id,
+            self.verbosity,
+            info,
+            errors,
+            self.__maximum_size,
+            self.__wait_seconds
+        ]))
+
+    def __eq__(self, other):
+        if other is None:
+            return False
+
+        if not isinstance(other, self.__class__):
+            return False
+
+        return hash(self) == hash(other)
+
+
+class CommunicatorGroup(typing.Mapping, Restorable):
     """
     A collection of Communicators clustered for group operations
     """
+
+    def get_package_arguments(self) -> typing.List:
+        return []
+
+    def get_package_keyword_arguments(self) -> typing.Dict[str, typing.Any]:
+        return {
+            "communicators": {
+                communicator_id: communicator.package_instance()
+                for communicator_id, communicator in self.__communicators.items()
+            }
+        }
+
     def __getitem__(self, key: str) -> Communicator:
         return self.__communicators[key]
 
@@ -171,7 +601,8 @@ class CommunicatorGroup(abstract_collections.Mapping):
         communicators: typing.Union[
             Communicator,
             typing.Iterable[Communicator],
-            typing.Mapping[str, Communicator]
+            typing.Mapping[str, Communicator],
+            CommunicatorGroup
         ] = None
     ):
         """
@@ -180,7 +611,11 @@ class CommunicatorGroup(abstract_collections.Mapping):
         Args:
             communicators: Communicators to be used by the collection
         """
-        if isinstance(communicators, typing.Mapping):
+        if isinstance(communicators, CommunicatorGroup):
+            self.__communicators = {
+
+            }
+        elif isinstance(communicators, typing.Mapping):
             self.__communicators: typing.Dict[str, Communicator] = {
                 key: value
                 for key, value in communicators.items()
@@ -300,10 +735,14 @@ class CommunicatorGroup(abstract_collections.Mapping):
             **kwargs:
         """
         if communicator_id:
-            self.__communicators[communicator_id].update(**kwargs)
+            communicator = self.__communicators[communicator_id]
+
+            if hasattr(communicator, 'update'):
+                communicator.update(**kwargs)
         else:
             for communicator in self.__communicators.values():
-                communicator.update(**kwargs)
+                if hasattr(communicator, 'update'):
+                    communicator.update(**kwargs)
 
     def sunset(self, seconds: float = None):
         """
@@ -313,7 +752,8 @@ class CommunicatorGroup(abstract_collections.Mapping):
             seconds:
         """
         for communicator in self.__communicators.values():
-            communicator.sunset(seconds)
+            if hasattr(communicator, 'sunset'):
+                communicator.sunset(seconds)
 
     def read_errors(self, *communicator_ids: str) -> typing.Iterable[str]:
         """
@@ -384,7 +824,9 @@ class CommunicatorGroup(abstract_collections.Mapping):
             True if there is a communicator that expects all data
         """
         return bool([
-            communicator for communicator in self.__communicators.values() if communicator.verbosity == Verbosity.ALL
+            communicator
+            for communicator in self.__communicators.values()
+            if communicator.verbosity == Verbosity.ALL
         ])
 
     def __str__(self):
@@ -396,3 +838,9 @@ class CommunicatorGroup(abstract_collections.Mapping):
     @property
     def empty(self):
         return len(self.__communicators) == 0
+
+    def copy(self) -> typing.Dict[str, Communicator]:
+        return {
+            communicator_id: communicator
+            for communicator_id, communicator in self.__communicators.items()
+        }

@@ -9,7 +9,7 @@ from typing import Iterator
 _T = typing.TypeVar("_T")
 
 
-class Bag(Collection[_T]):
+class Bag(Collection):
     """
     A wrapper collection that hides functions/elements that treat the contents as anything other than an abstract
     collection
@@ -19,7 +19,7 @@ class Bag(Collection[_T]):
         You need to represent collected data that is meant to be unordered, but not unique/requiring a hash.
         This leaves out list and set types.
     """
-    def __init__(self, data: typing.Collection[_T] = None):
+    def __init__(self, data: typing.Collection = None):
         self.__data = [value for value in data] if data is not None else list()
 
     def to_list(self) -> typing.List[_T]:

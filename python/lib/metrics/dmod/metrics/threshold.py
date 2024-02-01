@@ -1,7 +1,8 @@
 """
 Defines formalized Threshold objects that serve as functions for subsetting data
 """
-import numbers
+from __future__ import annotations
+
 import typing
 
 from math import inf as infinity
@@ -212,17 +213,31 @@ class Threshold(FRAME_FILTER):
     def default() -> "Threshold":
         return Threshold(name="All", value=-infinity, weight=1, on_observed=False, on_predicted=False)
 
+    @classmethod
+    def create(cls, data: typing.Mapping[str, typing.Any]) -> Threshold:
+        pass
+
+    def serialize(self) -> typing.Dict[str, typing.Any]:
+        return {
+            "name": self.name,
+            "value": self.value,
+            "on_observed": self._on_observed,
+            "on_predicted": self._on_predicted,
+            "observed_value_key": self._observed_value_key,
+            "predicted_value_key": self._predicted_value_key
+        }
+
     def __init__(
-            self,
-            name: str,
-            value: NUMBER,
-            weight: NUMBER,
-            on_observed: bool = True,
-            on_predicted: bool = False,
-            observed_value_key: str = None,
-            predicted_value_key: str = None,
-            operator: NUMERIC_FILTER = None,
-            transformation_function: INDEX_TRANSFORMATION_FUNCTION = None
+        self,
+        name: str,
+        value: NUMBER,
+        weight: NUMBER,
+        on_observed: bool = True,
+        on_predicted: bool = False,
+        observed_value_key: str = None,
+        predicted_value_key: str = None,
+        operator: NUMERIC_FILTER = None,
+        transformation_function: INDEX_TRANSFORMATION_FUNCTION = None
     ):
         """
 

@@ -8,7 +8,12 @@ import logging
 import logging.handlers
 import logging.config
 
+import arviz
+import numpy
 import pandas
+from arch.bootstrap import IIDBootstrap
+from arch.bootstrap import StationaryBootstrap
+from arch.bootstrap import optimal_block_length
 
 
 def configure_logging() -> typing.NoReturn:
@@ -138,3 +143,101 @@ class CommonTypes:
     """
     The key and row of a pandas series for use as it is being iterated
     """
+
+
+def create_bootstrap(
+    values: typing.Sequence[CommonTypes.NUMBER],
+    bootstrap_constructor: typing.Callable[[typing.Sequence[CommonTypes.NUMBER]], IIDBootstrap] = None,
+) -> IIDBootstrap:
+    if not isinstance(values, (numpy.ndarray, pandas.Series, pandas.DataFrame)):
+        values = numpy.array(values)
+
+    if bootstrap_constructor is None:
+        def constructor(data: numpy.ndarray) -> IIDBootstrap:
+            block_sizes = optimal_block_length(data)
+            stationary_block_sizes = block_sizes['stationary']
+            maximum_block_size = int(numpy.floor(stationary_block_sizes.max()))
+            return StationaryBootstrap(maximum_block_size, *data)
+
+        bootstrap_constructor = constructor
+
+    return bootstrap_constructor(values)
+
+
+def bootstrap_values(
+    values: typing.Sequence[CommonTypes.NUMBER],
+    bootstrap_constructor: typing.Callable[[typing.Sequence[CommonTypes.NUMBER]], IIDBootstrap] = None,
+    transformation: typing.Callable[[typing.Any], numpy.ndarray] = None,
+    repetitions: int = None,
+    **transformation_kwargs
+) -> typing.Sequence[float]:
+    if transformation is None:
+        transformation = numpy.mean
+
+    bootstrap = create_bootstrap(values=values, bootstrap_constructor=bootstrap_constructor)
+
+    if repetitions is None:
+        repetitions = 1000
+
+    values = bootstrap.apply(func=transformation, reps=repetitions, extra_kwargs=transformation_kwargs)
+    values = values.flatten()
+    return values
+
+
+def highest_density_interval(
+    values: typing.Sequence[CommonTypes.NUMBER],
+    probability: float = None,
+    transformation: typing.Callable[[typing.Any], numpy.ndarray] = None,
+    bootstrap_constructor: typing.Callable[[typing.Sequence[CommonTypes.NUMBER]], IIDBootstrap] = None,
+    bootstrap_repetitions: int = None,
+    **transformation_kwargs
+) -> typing.Sequence[float]:
+    if len(values) == 0:
+        return numpy.nan, numpy.nan
+    elif len(values) == 1:
+        return values[0], values[0]
+    elif len(values) <= 3:
+        return min(values), max(values)
+
+    if not isinstance(values, (numpy.ndarray, pandas.Series, pandas.DataFrame)):
+        values = numpy.array(values)
+
+    if isinstance(transformation, typing.Callable):
+        values = bootstrap_values(
+            values=values,
+            bootstrap_constructor=bootstrap_constructor,
+            transformation=transformation,
+            repetitions=bootstrap_repetitions,
+            **transformation_kwargs
+        )
+    elif transformation is not None:
+        raise ValueError(f"Cannot calculate the highest density interval - the transformation is not callable")
+
+    result = arviz.hdi(values, hdi_prob=probability)
+    assert result.shape == (2,)
+
+    return result.tolist()
+
+
+def confidence_interval(
+    values: typing.Sequence[CommonTypes.NUMBER],
+    transformation: typing.Callable[[typing.Any], numpy.ndarray] = None,
+    bootstrap_constructor: typing.Callable[[typing.Sequence[CommonTypes.NUMBER]], IIDBootstrap] = None,
+    bootstrap_repetitions: int = None,
+    **transformation_kwargs
+) -> typing.Sequence[float]:
+    if bootstrap_constructor is not None and not isinstance(bootstrap_constructor, typing.Callable):
+        raise TypeError(
+            f"Cannot create a bootstrap to determine the confidence interval - "
+            f"the passed bootstrap constructor is not callable"
+        )
+
+    bootstrap = create_bootstrap(values=values, bootstrap_constructor=bootstrap_constructor)
+
+    if transformation is None:
+        transformation = numpy.mean
+
+    if bootstrap_repetitions is None:
+        bootstrap_repetitions = 1000
+
+    return bootstrap.conf_int(transformation, reps=bootstrap_repetitions, extra_kwargs=transformation_kwargs).flatten()

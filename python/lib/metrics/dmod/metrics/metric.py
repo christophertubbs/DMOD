@@ -23,9 +23,10 @@ import scipy.stats
 
 from pandas.api import types as pandas_types
 
+from .communication import CommunicatorGroup
+
 from . import common
 from . import scoring
-from . import threshold
 from . import categorical
 from .threshold import Threshold
 
@@ -221,6 +222,10 @@ class CategoricalMetric(scoring.Metric, abc.ABC):
     Base class providing common implementations for Categorical metrics relying on truth tables
     """
     @classmethod
+    def is_categorical(cls) -> bool:
+        return True
+
+    @classmethod
     @abc.abstractmethod
     def get_metadata(cls) -> categorical.CategoricalMetricMetadata:
         """
@@ -270,12 +275,28 @@ class CategoricalMetric(scoring.Metric, abc.ABC):
             greater_is_better=self.get_metadata().greater_is_better
         )
 
+    def score_threshold(
+        self,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
+        observed_value_label: str,
+        predicted_value_label: str,
+        communicators: CommunicatorGroup = None,
+        *args,
+        **kwargs
+    ) -> float:
+        # Categorical Thresholds don't evaluate thresholds separately
+        raise Exception(
+            f"{self.__class__.__name__} does not calculate threshold scores independently. "
+            f"`score_threshold` is not a valid operation."
+        )
+
     def __call__(
         self,
         pairs: pandas.DataFrame,
         observed_value_label: str,
         predicted_value_label: str,
-        thresholds: typing.Sequence[threshold.Threshold] = None,
+        thresholds: typing.Sequence[Threshold] = None,
         *args,
         **kwargs
     ) -> scoring.Scores:
@@ -327,15 +348,22 @@ class CategoricalMetric(scoring.Metric, abc.ABC):
         if len(tables) == 0:
             raise ValueError("No truth tables were available to perform categorical metrics on")
 
-        scores: typing.List[scoring.Score] = [
-            scoring.Score(self, row['value'], tables[row['threshold']].threshold, sample_size=row['sample_size'])
-            for row_number, row in self._get_values(tables)
-        ]
+        scores = scoring.Scores(self)
 
-        return scoring.Scores(self, scores)
+        for row_number, row in self._get_values(tables):
+            value = row['value']
+            threshold_name = row['threshold']
+            threshold = tables[threshold_name].threshold
+            sample_size = row['sample_size']
+
+            score = scoring.Score(metric=self, value=value, threshold=threshold, sample_size=sample_size)
+            scores.add(score)
+
+        return scores
 
 
 class LinearTemporalTrendAbsoluteError(scoring.Metric):
+
     @classmethod
     def get_name(cls) -> str:
         return "Linear Temporal Trend of Absolute Error"
@@ -364,38 +392,25 @@ class LinearTemporalTrendAbsoluteError(scoring.Metric):
             greater_is_better=False
         )
 
-    def __call__(
+    def score_threshold(
         self,
-        pairs: pandas.DataFrame,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
         observed_value_label: str,
         predicted_value_label: str,
-        thresholds: typing.Sequence[threshold.Threshold] = None,
+        communicators: CommunicatorGroup = None,
         *args,
         **kwargs
-    ) -> scoring.Scores:
-        if not thresholds:
-            thresholds = [threshold.Threshold.default()]
-
-        scores: typing.List[scoring.Score] = list()
-
-        for error_threshold in thresholds:
-            result = numpy.nan
-            filtered_pairs = error_threshold(pairs)
-
-            if len(filtered_pairs) > 1:
-                errors = abs(filtered_pairs[observed_value_label] - filtered_pairs[predicted_value_label])
-                index_values = series_to_numeric_sequence(filtered_pairs)
-                regression_line = scipy.stats.linregress(index_values, errors)
-                result = numpy.rad2deg(numpy.arctan(regression_line.slope)) / 90.0
-
-            scores.append(
-                scoring.Score(self, result, error_threshold, sample_size=len(filtered_pairs))
-            )
-
-        return scoring.Scores(self, scores)
+    ) -> float:
+        errors = abs(filtered_pairs[observed_value_label] - filtered_pairs[predicted_value_label])
+        index_values = series_to_numeric_sequence(filtered_pairs)
+        regression_line = scipy.stats.linregress(index_values, errors)
+        result = numpy.rad2deg(numpy.arctan(regression_line.slope)) / 90.0
+        return result
 
 
 class PearsonCorrelationCoefficient(scoring.Metric):
+
     @classmethod
     def get_name(cls):
         return "Pearson Correlation Coefficient"
@@ -419,33 +434,32 @@ class PearsonCorrelationCoefficient(scoring.Metric):
             failure=0.0
         )
 
-    def __call__(
+    def score_threshold(
         self,
-        pairs: pandas.DataFrame,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
         observed_value_label: str,
         predicted_value_label: str,
-        thresholds: typing.Sequence[threshold.Threshold] = None,
+        communicators: CommunicatorGroup = None,
         *args,
         **kwargs
-    ) -> scoring.Scores:
-        if not thresholds:
-            thresholds = [threshold.Threshold.default()]
+    ) -> float:
+        result = numpy.nan
 
-        scores: typing.List[scoring.Score] = list()
+        if not filtered_pairs.empty:
+            observations = filtered_pairs[observed_value_label]
+            predictions = filtered_pairs[predicted_value_label]
 
-        for pearson_threshold in thresholds:
-            result = numpy.nan
-            filtered_pairs = pearson_threshold(pairs)
+            if observations.nunique() <= 1 or predictions.nunique() <= 1:
+                # If there aren't more than one unique value in the observations or predictions,
+                # correlation coefficient logic will attempt to divide by 0. Return nan early to avoid that.
+                return numpy.nan
 
-            if not filtered_pairs.empty:
-                result = numpy.corrcoef(filtered_pairs[observed_value_label], filtered_pairs[predicted_value_label])
-                if result is not None and len(result) > 0:
-                    result = result[0][1]
-            scores.append(
-                scoring.Score(self, result, pearson_threshold, sample_size=len(filtered_pairs))
-            )
+            result = numpy.corrcoef(observations, predictions)
+            if result is not None and len(result) > 0:
+                result = result[0][1]
 
-        return scoring.Scores(self, scores)
+        return result
 
 
 class KlingGuptaEfficiency(scoring.Metric):
@@ -472,18 +486,45 @@ class KlingGuptaEfficiency(scoring.Metric):
             ideal_value=1
         )
 
-    def __call__(
+    def _add_to_kwargs(
         self,
         pairs: pandas.DataFrame,
         observed_value_label: str,
         predicted_value_label: str,
         thresholds: typing.Sequence[Threshold] = None,
+        *args,
+        **kwargs
+    ) -> typing.Mapping:
+        alpha_values = PearsonCorrelationCoefficient(self.weight)(
+            pairs,
+            observed_value_label,
+            predicted_value_label,
+            thresholds,
+            *args,
+            **kwargs
+        )
+        kwargs['alpha_values'] = alpha_values
+        return kwargs
+
+    def score_threshold(
+        self,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
+        observed_value_label: str,
+        predicted_value_label: str,
+        alpha_values: scoring.Scores = None,
         alpha_scale: float = None,
         beta_scale: float = None,
         gamma_scale: float = None,
+        communicators: CommunicatorGroup = None,
         *args,
         **kwargs
-    ) -> scoring.Scores:
+    ) -> float:
+        if not alpha_values:
+            raise ValueError(f"Cannot calculate the Kling Gupta Efficiency without a set of alpha values")
+
+        result = numpy.nan
+
         if alpha_scale is None or numpy.isnan(alpha_scale):
             alpha_scale = 1
 
@@ -493,51 +534,36 @@ class KlingGuptaEfficiency(scoring.Metric):
         if gamma_scale is None or numpy.isnan(gamma_scale):
             gamma_scale = 1
 
-        alpha_values = PearsonCorrelationCoefficient(self.weight)(
-            pairs,
-            observed_value_label,
-            predicted_value_label,
-            thresholds,
-            *args,
-            **kwargs
-        )
+        alpha = alpha_values[threshold].value
 
-        scores: typing.List[scoring.Score] = list()
+        if not filtered_pairs.empty:
+            observed_values: pandas.Series = filtered_pairs[observed_value_label]
+            predicted_values: pandas.Series = filtered_pairs[predicted_value_label]
 
-        for kling_threshold in thresholds:
-            result = numpy.nan
-            filtered_pairs = kling_threshold(pairs)
+            observed_mean = observed_values.mean()
+            predicted_mean = predicted_values.mean()
 
-            if not filtered_pairs.empty:
-                observed_values: pandas.Series = filtered_pairs[observed_value_label]
-                predicted_values: pandas.Series = filtered_pairs[predicted_value_label]
+            observed_std = observed_values.std()
+            predicted_std = predicted_values.std()
 
-                observed_mean = observed_values.mean()
-                predicted_mean = predicted_values.mean()
+            # The ratio between the standard deviation of the simulated values and the standard deviation of the
+            # observed ones. Ideal value is Alpha=1
+            alpha *= alpha_scale
 
-                observed_std = observed_values.std()
-                predicted_std = predicted_values.std()
+            # The ratio between the mean of the simulated values and the mean of the observed ones.
+            # Ideal value is Beta=1
+            beta = predicted_mean / observed_mean
+            beta *= beta_scale
 
-                # The ratio between the standard deviation of the simulated values and the standard deviation of the
-                # observed ones. Ideal value is Alpha=1
-                alpha = alpha_values[kling_threshold].value
-                alpha *= alpha_scale
+            # The ratio between the coefficient of variation (CV) of the simulated values to the coefficient of
+            # variation of the observed ones. Ideal value is Gamma=1
+            gamma = predicted_std / observed_std
+            gamma *= gamma_scale
 
-                # The ratio between the mean of the simulated values and the mean of the observed ones.
-                # Ideal value is Beta=1
-                beta = predicted_mean / observed_mean
-                beta *= beta_scale
+            initial_result = math.sqrt((alpha - 1)**2 + (beta - 1)**2 + (gamma - 1)**2)
+            result = 1.0 - initial_result
 
-                # The ratio between the coefficient of variation (CV) of the simulated values to the coefficient of
-                # variation of the observed ones. Ideal value is Gamma=1
-                gamma = predicted_std / observed_std
-                gamma *= gamma_scale
-
-                initial_result = math.sqrt((alpha - 1)**2 + (beta - 1)**2 + (gamma - 1)**2)
-                result = 1.0 - initial_result
-            scores.append(scoring.Score(self, result, kling_threshold, sample_size=len(filtered_pairs)))
-
-        return scoring.Scores(self, scores)
+        return result
 
 
 class NormalizedNashSutcliffeEfficiency(scoring.Metric):
@@ -563,41 +589,29 @@ class NormalizedNashSutcliffeEfficiency(scoring.Metric):
             ideal_value=1
         )
 
-    def __call__(
+    def score_threshold(
         self,
-        pairs: pandas.DataFrame,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
         observed_value_label: str,
         predicted_value_label: str,
-        thresholds: typing.Sequence[Threshold] = None,
+        communicators: CommunicatorGroup = None,
         *args,
         **kwargs
-    ) -> scoring.Scores:
-        scores: typing.List[scoring.Score] = list()
+    ) -> float:
+        normalized_nash_sutcliffe_efficiency = numpy.nan
 
-        for nnse_threshold in thresholds:
-            normalized_nash_sutcliffe_efficiency = numpy.nan
-            filtered_pairs = nnse_threshold(pairs)
+        if not filtered_pairs.empty:
+            mean_observation = filtered_pairs[observed_value_label].mean()
 
-            if not filtered_pairs.empty:
-                mean_observation = filtered_pairs[observed_value_label].mean()
+            numerator = (filtered_pairs[observed_value_label].sub(filtered_pairs[predicted_value_label])**2).sum()
+            denominator = (filtered_pairs[observed_value_label].sub(mean_observation)**2).sum()
 
-                numerator = (filtered_pairs[observed_value_label].sub(filtered_pairs[predicted_value_label])**2).sum()
-                denominator = (filtered_pairs[observed_value_label].sub(mean_observation)**2).sum()
+            nash_suttcliffe_efficiency = 1 - (numerator / denominator)
 
-                nash_suttcliffe_efficiency = 1 - (numerator / denominator)
+            normalized_nash_sutcliffe_efficiency = 1 / (2 - nash_suttcliffe_efficiency)
 
-                normalized_nash_sutcliffe_efficiency = 1 / (2 - nash_suttcliffe_efficiency)
-
-            scores.append(
-                scoring.Score(
-                    self,
-                    normalized_nash_sutcliffe_efficiency,
-                    nnse_threshold,
-                    sample_size=len(filtered_pairs)
-                )
-            )
-
-        return scoring.Scores(self, scores)
+        return normalized_nash_sutcliffe_efficiency
 
 
 class VolumeError(scoring.Metric):
@@ -622,28 +636,37 @@ class VolumeError(scoring.Metric):
             greater_is_better=False
         )
 
-    def __call__(
+    def score_threshold(
         self,
-        pairs: pandas.DataFrame,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
         observed_value_label: str,
         predicted_value_label: str,
-        thresholds: typing.Sequence[Threshold] = None,
+        communicators: CommunicatorGroup = None,
         *args,
         **kwargs
-    ) -> scoring.Scores:
-        scores: typing.List[scoring.Score] = list()
-
-        for volume_threshold in thresholds:
-            filtered_pairs = volume_threshold(pairs)
-            difference = 0
-            if not filtered_pairs.empty:
-                dates: typing.List[int] = [value.astype("int") for value in filtered_pairs.index.values]
+    ) -> float:
+        difference = 0
+        if not filtered_pairs.empty:
+            dates: typing.List[int] = [value.astype("int") for value in filtered_pairs.index.values]
+            try:
                 area_under_observations = sklearn.metrics.auc(dates, filtered_pairs[observed_value_label])
-                area_under_predictions = sklearn.metrics.auc(dates, filtered_pairs[predicted_value_label])
-                difference = area_under_predictions - area_under_observations
-            scores.append(scoring.Score(self, difference, volume_threshold, sample_size=len(filtered_pairs)))
+            except ValueError as error:
+                if 'neither increasing nor decreasing' in str(error):
+                    area_under_observations = numpy.trapz(filtered_pairs[observed_value_label], dates)
+                else:
+                    raise
 
-        return scoring.Scores(self, scores)
+            try:
+                area_under_predictions = sklearn.metrics.auc(dates, filtered_pairs[predicted_value_label])
+            except ValueError as error:
+                if 'neither increasing nor decreasing' in str(error):
+                    area_under_predictions = numpy.trapz(filtered_pairs[predicted_value_label], dates)
+                else:
+                    raise
+
+            difference = area_under_predictions - area_under_observations
+        return difference
 
 
 class ProbabilityOfDetection(CategoricalMetric):

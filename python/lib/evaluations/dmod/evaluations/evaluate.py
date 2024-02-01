@@ -4,6 +4,7 @@ import json
 import logging
 
 import pandas
+from dmod.metrics import MetricResults
 
 from dmod.metrics.communication import Verbosity
 import dmod.metrics as metrics
@@ -583,6 +584,96 @@ class Evaluator:
         )
 
         return scores
+
+
+def get_thresholds_per_location(
+    threshold_specification: typing.Sequence[specification.ThresholdSpecification],
+    location_name: str
+) -> typing.Sequence[metrics.Threshold]:
+
+    thresholds: typing.List[metrics.Threshold] = []
+    for threshold_definition in threshold_specification:
+        found_thresholds = threshold.get_thresholds(threshold_definition)
+
+        for location, threshold_list in found_thresholds.items():
+            if location not in thresholds:
+                thresholds[location] = list()
+            thresholds[location].extend(threshold_list)
+
+    return thresholds
+
+
+
+def evaluate_location(
+    scheme: typing.Union[specification.SchemeSpecification, metrics.ScoringScheme],
+    observed_value_field: str,
+    predicted_value_field: str,
+    observed_location: str,
+    simulated_location: str,
+    thresholds: typing.Union[typing.Sequence[metrics.Threshold], specification.ThresholdSpecification],
+    data: typing.Union[str, bytes, typing.Dict, pandas.DataFrame],
+    communicators: metrics.CommunicatorGroup,
+    verbosity: Verbosity
+) -> typing.Optional[MetricResults]:
+    if isinstance(scheme, specification.SchemeSpecification):
+        scheme = scheme.generate_scheme(communicators=communicators)
+
+    if isinstance(thresholds, specification.ThresholdSpecification):
+        ...
+
+    if isinstance(data, (str, bytes)):
+        data = json.loads(data)
+
+    if isinstance(data, typing.Sequence):
+        data = pandas.DataFrame(data)
+
+    identifiers = f"{observed_location} vs {simulated_location}"
+
+    metadata = {
+        "observed_location": observed_location,
+        "predicted_location": simulated_location,
+    }
+
+    communicators.info(
+        f"Creating truth tables for {str(identifiers)}",
+        verbosity=Verbosity.LOUD,
+        publish=True
+    )
+
+    truth_tables = metrics.categorical.TruthTables(
+        data[observed_value_field],
+        data[predicted_value_field],
+        thresholds
+    )
+
+    communicators.info(
+        f"Scoring {str(identifiers)}",
+        verbosity=Verbosity.LOUD,
+        publish=True
+    )
+
+    if thresholds:
+        location_scores = scheme.score(
+            data,
+            observed_value_field,
+            predicted_value_field,
+            thresholds,
+            metadata=metadata,
+            truth_tables=truth_tables
+        )
+
+        if verbosity == Verbosity.ALL:
+            data = {
+                "observed_location": observed_location,
+                "predicted_location": simulated_location,
+                "scores": location_scores.to_dict(),
+            }
+            reason = "location_scores"
+            communicators.write(reason=reason, data=data)
+
+        return location_scores
+
+    return None
 
 
 def evaluate(

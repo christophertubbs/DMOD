@@ -1,29 +1,71 @@
 #!/usr/bin/env python
+from __future__ import annotations
+
+import itertools
+import logging
+import os
 import typing
 import string
 import abc
 import re
-import json
 
 from collections import defaultdict
 from collections import abc as abstract_collections
+from datetime import datetime
 
 from math import inf as infinity
 
+from typing_extensions import ParamSpec
+from typing_extensions import Concatenate
+from typing_extensions import Annotated
+
 import pandas
 import numpy
+import numpy.typing
+
+from arch import bootstrap
+
+from arviz import hdi
 
 import dmod.core.common as common
 
+from .common import highest_density_interval
+from .distributor import SynchronousWorkDistributor
+from .distributor import ThreadedWorkDistributor
+from .distributor import WorkDistributionProtocol
 from .threshold import Threshold
 from .communication import Verbosity
+from .communication import Communicator
 from .communication import CommunicatorGroup
 
-ARGS = typing.Optional[typing.Sequence]
-KWARGS = typing.Optional[typing.Dict[str, typing.Any]]
+ARGS_AND_KWARGS = ParamSpec("ARGS_AND_KWARGS")
 NUMBER = typing.Union[int, float]
 
-METRIC = typing.Callable[[pandas.DataFrame, pandas.DataFrame, typing.Sequence["Threshold"], ARGS, KWARGS], NUMBER]
+METRIC = typing.Callable[
+    Concatenate[
+        pandas.DataFrame,
+        pandas.DataFrame,
+        typing.Sequence[Threshold],
+        ARGS_AND_KWARGS
+    ],
+    NUMBER
+]
+
+SCORE_FUNCTION = typing.Callable[
+    Concatenate[
+        pandas.DataFrame,
+        str,
+        str,
+        typing.Optional[typing.Sequence[Threshold]],
+        ARGS_AND_KWARGS
+    ],
+    "Scores"
+]
+"""Function used to score results - `f(pairs, obs label, forecast label, thresholds, *args, **kwargs)`"""
+
+BOOTSTRAP_CLASS = typing.TypeVar("BOOTSTRAP_CLASS", bound=bootstrap.IIDBootstrap, covariant=True)
+DEFAULT_BOOTSTRAP = bootstrap.StationaryBootstrap
+
 NUMERIC_OPERATOR = typing.Callable[[NUMBER, NUMBER, typing.Optional[NUMBER]], NUMBER]
 NUMERIC_TRANSFORMER = typing.Callable[[NUMBER], NUMBER]
 NUMERIC_FILTER = typing.Callable[[NUMBER, NUMBER], bool]
@@ -35,7 +77,7 @@ EPSILON = 0.0001
 WHITESPACE_PATTERN = re.compile(f"[{string.whitespace}]+")
 
 
-def scale_value(metric: "Metric", raw_value: NUMBER) -> NUMBER:
+def scale_value(metric: Metric, raw_value: NUMBER) -> NUMBER:
     """
     Rescales the result of a metric to bear a value in relation to the metric's ideal value.
 
@@ -127,10 +169,7 @@ def create_identifier(name: str) -> str:
     return identifier
 
 
-class Metric(
-    abc.ABC,
-    typing.Callable[[pandas.DataFrame, str, str, typing.Optional[typing.Sequence[Threshold]], ARGS, KWARGS], "Scores"]
-):
+class Metric(abc.ABC, SCORE_FUNCTION):
     """
     A functional that may be called to evaluate metrics based around thresholds, providing access to attributes
     such as its name and bounds
@@ -290,7 +329,17 @@ class Metric(
     def get_name(cls) -> str:
         pass
 
-    @abc.abstractmethod
+    def _add_to_kwargs(
+        self,
+        pairs: pandas.DataFrame,
+        observed_value_label: str,
+        predicted_value_label: str,
+        thresholds: typing.Sequence[Threshold] = None,
+        *args,
+        **kwargs
+    ) -> typing.Mapping:
+        return kwargs
+
     def __call__(
         self,
         pairs: pandas.DataFrame,
@@ -298,10 +347,150 @@ class Metric(
         predicted_value_label: str,
         thresholds: typing.Sequence[Threshold] = None,
         communicators: CommunicatorGroup = None,
+        bootstrap_class: BOOTSTRAP_CLASS = None,
         *args,
         **kwargs
-    ) -> "Scores":
+    ) -> Scores:
+        if not thresholds:
+            thresholds = [Threshold.default()]
+
+        kwargs = self._add_to_kwargs(
+            pairs=pairs,
+            observed_value_label=observed_value_label,
+            predicted_value_label=predicted_value_label,
+            thresholds=thresholds,
+            *args,
+            **kwargs
+        )
+
+        scores: typing.List[Score] = list()
+
+        for threshold in thresholds:
+            filtered_pairs = threshold(pairs)
+
+            result = self.score_threshold(
+                filtered_pairs=filtered_pairs,
+                threshold=threshold,
+                observed_value_label=observed_value_label,
+                predicted_value_label=predicted_value_label,
+                communicators=communicators,
+                *args, **kwargs
+            )
+
+            if len(filtered_pairs) > 3:
+                time_before_interval_generation = datetime.now()
+                interval = self.generate_bootstrap_intervals(
+                    filtered_pairs=filtered_pairs,
+                    threshold=threshold,
+                    observed_value_label=observed_value_label,
+                    predicted_value_label=predicted_value_label,
+                    communicators=communicators,
+                    bootstrap_class=bootstrap_class,
+                    *args,
+                    **kwargs
+                )
+                print(f"It took {datetime.now() - time_before_interval_generation} to generate an interval for {self.name}")
+            else:
+                interval = None
+
+            score = Score(
+                metric=self,
+                value=result,
+                interval=interval,
+                threshold=threshold,
+                sample_size=len(filtered_pairs)
+            )
+
+            scores.append(score)
+
+        return Scores(metric=self, scores=scores)
+
+    def generate_bootstrap_intervals(
+        self,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
+        observed_value_label: str,
+        predicted_value_label: str,
+        communicators: CommunicatorGroup = None,
+        bootstrap_class: BOOTSTRAP_CLASS = None,
+        *args,
+        **kwargs
+    ) -> typing.Optional[typing.Sequence[float]]:
+        if len(filtered_pairs) < 5:
+            return None
+
+        if bootstrap_class is None:
+            bootstrap_class = DEFAULT_BOOTSTRAP
+
+        bootstrap_type = "stationary" if bootstrap_class == bootstrap.StationaryBootstrap else "circular"
+
+        predicted_vs_observed = filtered_pairs[[observed_value_label, predicted_value_label]]
+
+        try:
+            block_length = bootstrap.optimal_block_length(predicted_vs_observed.values)[bootstrap_type].max()
+        except Exception as e:
+            logging.error("Could not establish the block length for a bootstrapping operation")
+            raise
+
+        threshold_bootstrap = bootstrap_class(block_length, filtered_pairs)
+
+        before_bootstrap_application = datetime.now()
+        metric_distribution: numpy.ndarray[Score] = threshold_bootstrap.apply(
+            lambda pairs: self.score_threshold(
+                filtered_pairs=pairs,
+                threshold=threshold,
+                observed_value_label=observed_value_label,
+                predicted_value_label=predicted_value_label,
+                communicators=communicators,
+                *args,
+                **kwargs
+            )
+        )
+        print(f"It took {datetime.now() - before_bootstrap_application} to bootstrap data for {self.name}")
+
+        before_hdi = datetime.now()
+        interval = hdi(
+            metric_distribution.flatten(),
+            hdi_prob=0.95
+        )
+        print(f"It took {datetime.now() - before_hdi} to develop the hdi interval")
+
+        return interval.tolist()
+
+    @abc.abstractmethod
+    def score_threshold(
+        self,
+        filtered_pairs: pandas.DataFrame,
+        threshold: Threshold,
+        observed_value_label: str,
+        predicted_value_label: str,
+        communicators: CommunicatorGroup = None,
+        *args,
+        **kwargs
+    ) -> float:
         pass
+
+    @classmethod
+    def is_categorical(cls) -> bool:
+        return False
+
+    @property
+    def details(self) -> typing.Dict[str, typing.Any]:
+        return {
+            "name": self.name,
+            "ideal_value": self.ideal_value,
+            "lower_bound": self.lower_bound,
+            "upper_bound": self.upper_bound,
+            "is_categorical": self.is_categorical(),
+            "fails_on": self.fails_on,
+            "weight": self.weight
+        }
+
+    def serialize(self) -> typing.Dict[str, typing.Any]:
+        return {
+            "name": self.name,
+            "weight": self.weight
+        }
 
     def __str__(self) -> str:
         return self.name
@@ -310,16 +499,37 @@ class Metric(
         return "Metric(name=" + self.name + ")"
 
 
-class Score(object):
-    def __init__(self, metric: Metric, value: NUMBER, threshold: Threshold = None, sample_size: int = None):
+class Score:
+    def __init__(
+        self,
+        metric: Metric,
+        value: NUMBER,
+        interval: typing.Sequence[float] = None,
+        threshold: Threshold = None,
+        sample_size: int = None
+    ):
         self.__metric = metric
         self.__value = value
         self.__threshold = threshold or Threshold.default()
         self.__sample_size = sample_size or numpy.nan
+        self.__interval = interval
 
     @property
     def value(self) -> NUMBER:
         return self.__value
+
+    @property
+    def interval(self) -> typing.Optional[numpy.ndarray]:
+        """
+        The range within which there is a confidence of 95% where the most accurate value of this score resides
+        """
+        if self.__interval is None:
+            return None
+
+        value = numpy.array(self.__interval)
+        assert value.shape == (2,)
+
+        return value
 
     @property
     def grade(self) -> NUMBER:
@@ -333,7 +543,27 @@ class Score(object):
         """
         The normalized metric score as a fraction of the threshold's weight
         """
-        return scale_value(self.__metric, self.__value) * self.__threshold.weight
+        raw_scaled_value = scale_value(self.__metric, self.__value)
+
+        if numpy.isnan(raw_scaled_value):
+            print(
+                f"{self.__metric.name} score for the {self.__threshold.name} threshold has a null scaled value based on a value of {self.__value} and information from {os.linesep}"
+                f"{self.__metric.details}"
+            )
+
+        return raw_scaled_value * self.__threshold.weight
+
+    @property
+    def scaled_interval(self) -> typing.Optional[numpy.ndarray]:
+        """
+        The interval for the score with each value properly oriented within the [0, 1] scale
+        """
+        new_bounds = [scale_value(self.__metric, bound) for bound in self.interval]
+
+        if not all([not numpy.isnan(bound) for bound in new_bounds]):
+            return None
+
+        return numpy.array(new_bounds)
 
     @property
     def metric(self) -> Metric:
@@ -374,11 +604,16 @@ class Score(object):
             "value": common.truncate(self.value, 2),
             "scaled_value": common.truncate(self.scaled_value, 2),
             "sample_size": common.truncate(self.sample_size, 2),
+            "interval": self.__interval,
+            "scaled_interval": self.scaled_interval.tolist() if self.scaled_interval else None,
             "failed": self.failed,
             "weight": self.threshold.weight,
             "threshold": self.threshold.name,
             "grade": self.grade,
         }
+
+    def __bool__(self) -> bool:
+        return self.__sample_size
 
     def __len__(self):
         return self.__sample_size
@@ -393,6 +628,8 @@ class Score(object):
 class ScoreDescription:
     """
     A simple class used to help organize finalized score data
+
+    Manages the formatting of all scores for an individual Metric
     """
     def __init__(self, scores: typing.Sequence[Score]):
         self.__total: int = 0
@@ -401,32 +638,55 @@ class ScoreDescription:
         self.__thresholds: typing.Dict[str, dict] = dict()
         self.__scaled_value: int = 0
         self.__metric_name = None
+        self.__interval: typing.Optional[numpy.ndarray] = None
+        self.__scaled_interval: typing.Optional[numpy.ndarray] = None
 
-        common.on_each(self.add_score, scores)
+        self.__add_scores(scores)
 
-        self.update_scaled_value()
+    @property
+    def total_interval(self) -> typing.Optional[numpy.ndarray]:
+        return self.__interval
 
-    def add_score(self, score: Score):
-        if self.__weight is None:
-            self.__weight = score.metric.weight
-            self.__metric_name = score.metric.name
+    def __calculate_intervals(self, scores: typing.Sequence[Score]):
+        self.__interval = sum([score.interval for score in scores if score.interval])
 
-        self.__thresholds[score.threshold.name] = score.to_dict()
+        threshold_weights = [score.threshold.weight for score in scores if score.interval]
+        self.__scaled_interval = numpy.average(
+            [score.scaled_interval for score in scores if score.scaled_interval],
+            axis=0,
+            weights=threshold_weights
+        )
 
-        if not numpy.isnan(score.scaled_value):
-            self.__maximum_metric_value += score.threshold.weight
-            self.__total += score.scaled_value
+    @property
+    def scaled_interval(self) -> typing.Optional[numpy.ndarray]:
+        return self.__scaled_interval
 
-    def update_scaled_value(self):
+    def __add_scores(self, scores: typing.Sequence[Score]):
+        for score in scores:
+            if self.__weight is None:
+                self.__weight = score.metric.weight
+                self.__metric_name = score.metric.name
+
+            self.__thresholds[score.threshold.name] = score.to_dict()
+
+            if not numpy.isnan(score.scaled_value):
+                self.__maximum_metric_value += score.threshold.weight
+                self.__total += score.scaled_value
+
         if self.has_value:
             scale_factor = self.__total / self.__maximum_metric_value
             self.__scaled_value = scale_factor * self.__weight
 
+            self.__calculate_intervals(scores)
+
     def to_dict(self) -> dict:
         return {
+            "name": self.__metric_name,
             "total": self.__total,
+            "total_interval": self.total_interval,
             "maximum_possible_value": self.__maximum_metric_value,
             "scaled_value": self.__scaled_value,
+            "scaled_interval": self.scaled_interval,
             "thresholds": self.__thresholds,
             "weight": self.__weight
         }
@@ -467,20 +727,38 @@ class ScoreDescription:
         return self.__str__()
 
     def __str__(self):
-        return f"{self.name}: {self.value} out of {self.maximum_value}"
+        return f"{self.name}: {self.__total} out of {self.maximum_value}"
 
 
-class Scores(abstract_collections.Sequence):
+class Scores(abstract_collections.Sequence[Score]):
     def __len__(self) -> int:
         return len(self.__results)
 
-    def __init__(self, metric: Metric, scores: typing.Sequence[Score]):
+    def __init__(self, metric: Metric, scores: typing.Sequence[Score] = None):
         self.__metric = metric
+
+        if scores is None:
+            scores = []
 
         self.__results = {
             score.threshold: score
             for score in scores
         }
+
+    def add(self, score: Score):
+        if not isinstance(score, Score):
+            raise TypeError(
+                f"Cannot add a '{score.__class__.__name__ if score is not None else None}' "
+                f"object to a scores collection"
+            )
+
+        if score.metric != self.metric:
+            raise ValueError(f"Cannot add a score for {score.metric} to a collection of {self.metric} scores")
+
+        if score.threshold in self.__results:
+            raise ValueError(f"There is already a value for the '{score.threshold}' threshold in this score collection")
+
+        self.__results[score.threshold] = score
 
     @property
     def metric(self) -> Metric:
@@ -497,14 +775,13 @@ class Scores(abstract_collections.Sequence):
           i = 0
         """
         if len(self.__results) == 0:
-            raise ValueError("There are no scores to total")
+            return 0
 
         return sum([
             score.scaled_value
             for score in self
             if not numpy.isnan(score.sample_size)
                and score.sample_size > 0
-               and not numpy.isnan(score.scaled_value)
         ])
 
     @property
@@ -527,14 +804,25 @@ class Scores(abstract_collections.Sequence):
           i = 0
 
         """
-        valid_scores: typing.List[Score] = [
-            score
+        scores = [
+            score.scaled_value
             for score in self
             if not numpy.isnan(score.sample_size)
-               and score.sample_size > 0
+                and score.sample_size > 0
         ]
-        max_possible = sum([score.threshold.weight for score in valid_scores])
-        return self.total / max_possible if max_possible else numpy.nan
+
+        weights = [
+            score.threshold.weight
+            for score in self
+            if not numpy.isnan(score.sample_size)
+                and score.sample_size > 0
+        ]
+
+        try:
+            average = numpy.average(scores, weights=weights)
+            return average
+        except:
+            return numpy.nan
 
     @property
     def scaled_value(self) -> float:
@@ -552,25 +840,42 @@ class Scores(abstract_collections.Sequence):
         """
         return self.performance * self.metric.weight
 
+    @property
+    def scaled_interval(self) -> typing.Sequence[float]:
+        return highest_density_interval([
+            score.scaled_value
+            for score in self
+            if score.sample_size > 0
+        ])
+
+    @property
+    def interval(self) -> typing.Sequence[float]:
+        return highest_density_interval([
+            score.value
+            for score in self
+            if score.sample_size > 0
+        ])
+
     def to_dict(self) -> dict:
         score_representation = {
             "total": self.total,
+            "interval": self.interval,
             "scaled_value": common.truncate(self.scaled_value, 2),
+            "scaled_interval": self.scaled_interval,
             "grade": "{:.2f}%".format(self.performance * 100) if not numpy.isnan(self.performance) else None,
             "scores": dict()
         }
 
         for threshold, score in self.__results.items():  # type: Threshold, Score
-            score_representation['scores'][str(threshold)] = {
-                "value": common.truncate(score.value, 2),
-                "scaled_value": common.truncate(score.scaled_value, 2),
-                "sample_size": common.truncate(score.sample_size, 2),
-                "failed": score.failed,
-                "weight": score.threshold.weight,
-                "grade": common.truncate(score.grade, 3),
-            }
+            score_representation['scores'][str(threshold)] = score.to_dict()
 
         return score_representation
+
+    @property
+    def has_data(self) -> bool:
+        return any([
+            score.sample_size > 0 for score in self
+        ])
 
     def __getitem__(self, key: typing.Union[str, Threshold]) -> Score:
         if isinstance(key, Threshold):
@@ -582,11 +887,23 @@ class Scores(abstract_collections.Sequence):
 
         raise ValueError(f"There is not a score for '{key}'")
 
-    def __iter__(self):
+    def __setitem__(self, key: Threshold, value: Score):
+        if not isinstance(key, Threshold):
+            raise TypeError(f"Cannot assign a score to a Scores collection with a key that is not a threshold")
+
+        if not isinstance(value, Score):
+            raise TypeError(f"Cannot add a '{value.__class__.__name__}' object to a Scores collection")
+
+        self.add(value)
+
+    def __bool__(self):
+        return self.has_data
+
+    def __iter__(self) -> typing.Iterator[Score]:
         return iter(self.__results.values())
 
     def __str__(self) -> str:
-        return ", ".join([str(score) for score in self.__results])
+        return f"[{self.metric.name}] " + ", ".join([str(score) for score in self.__results])
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -600,42 +917,39 @@ class MetricResults:
     """
     def __init__(
         self,
-        metric_scores: typing.Sequence[Scores] = None,
+        name: str = None,
         weight: NUMBER = None
     ):
+        self.__name = name
         self.__weight = weight or 1
-        self.__scaled_value = 0
-        self.__total = 0
-        self.__maximum_valid_score = 0
+        self.__metrics: typing.Dict[Metric, Scores] = {}
 
-        if not metric_scores:
-            metric_scores = list()
+    @property
+    def name(self) -> typing.Optional[str]:
+        return self.__name
 
-        self.__results: typing.Dict[Threshold, typing.List[Score]] = defaultdict(list)
-        self.__metric_scores = list()
-
-        self.__metrics: typing.Dict[str, typing.List[Score]] = defaultdict(list)
-
-        for scores in metric_scores:
-            self.add_scores(scores)
-
+    @property
+    def scaled_interval(self) -> typing.Sequence[float]:
+        interval = highest_density_interval([
+            Scores(metric, scores).scaled_value
+            for metric, scores in self.__metrics.items()
+        ])
+        return interval
 
     def to_dict(self) -> typing.Dict:
         structured_results = {
+            "interval": self.scaled_interval,
             "weight": self.weight,
             "grade": self.grade,
             "scaled_value": self.scaled_value,
             "scores": dict()
         }
 
-        for metric_name, scores in self.__metrics.items():  # type: str, typing.List[Score]
+        for metric, scores in self.__metrics.items():  # type: Metric, Scores
             description = ScoreDescription(scores)
 
             if description.has_value:
-                structured_results['scores'][metric_name] = description.to_dict()
-
-        structured_results['scaled_value'] = self.scaled_value
-        structured_results['grade'] = self.grade
+                structured_results['scores'][metric.name] = scores.to_dict()
 
         return structured_results
 
@@ -646,12 +960,6 @@ class MetricResults:
         has_maximum_possible_value = self.maximum_valid_score != 0 and not numpy.isnan(self.maximum_valid_score)
 
         return has_weight and has_maximum_possible_value and has_total
-
-    def update_scaled_value(self):
-        if self.has_value:
-            scale_factor = self.total / self.maximum_valid_score
-            scaled_value = scale_factor * self.weight
-            self.__scaled_value = scaled_value
 
     @property
     def scaled_value(self) -> float:
@@ -667,7 +975,16 @@ class MetricResults:
               i = 0
 
         """
-        return self.__scaled_value
+        return numpy.average(
+            [
+                scores.performance
+                for scores in self.values()
+            ],
+            weights=[
+                scores.metric.weight
+                for scores in self.values()
+            ]
+        )
 
     def rows(self, include_metadata: bool = None) -> typing.List[typing.Dict[str, typing.Any]]:
         """
@@ -684,34 +1001,41 @@ class MetricResults:
 
         rows = list()
 
-        for threshold, scores in self.__results.items():  # type: Threshold, typing.List[Score]
-            threshold_rows: typing.List[dict] = list()
+        for metric, scores in self.__metrics.items():
+            threshold_values = metric.threshold.value
 
-            threshold_values = list(threshold.value) if isinstance(threshold.value, pandas.Series) else threshold.value
-            threshold_value_is_sequence = isinstance(threshold.value, typing.Sequence)
-            threshold_value_is_sequence &= not isinstance(threshold.value, str)
+            if isinstance(threshold_values, pandas.Series):
+                threshold_values = threshold_values.tolist()
 
-            threshold_value = threshold_values[0] if threshold_value_is_sequence else threshold.value
+            threshold_value_is_sequence = isinstance(metric.threshold.value, typing.Sequence)
+            threshold_value_is_sequence &= not isinstance(metric.threshold.value, str)
+
+            threshold_value = threshold_values[0] if threshold_value_is_sequence else metric.threshold.value
+            metric_rows: typing.List[dict] = list()
 
             for score in scores:
                 row_values = dict()
-                row_values['threshold_name'] = threshold.name
-                row_values['threshold_weight'] = threshold.weight
+                row_values['threshold_name'] = metric.threshold.name
+                row_values['threshold_weight'] = metric.threshold.weight
                 row_values['result'] = score.value
                 row_values['scaled_result'] = score.scaled_value
-                row_values['metric'] = score.metric.name
-                row_values['metric_weight'] = score.metric.weight
+                row_values['metric'] = metric.name
+                row_values['metric_weight'] = metric.weight
+                row_values['interval_lower_bound'] = score.interval[0]
+                row_values['interval_upper_bound'] = score.interval[1]
+                row_values['scaled_interval_lower_bound'] = score.scaled_interval[0]
+                row_values['scaled_interval_upper_bound'] = score.scaled_interval[1]
 
                 if include_metadata:
                     row_values['threshold_value'] = threshold_value
-                    row_values['desired_metric_value'] = score.metric.ideal_value
-                    row_values['failing_metric_value'] = score.metric.fails_on
-                    row_values['metric_lower_bound'] = score.metric.lower_bound
-                    row_values['metric_upper_bound'] = score.metric.upper_bound
+                    row_values['desired_metric_value'] = metric.ideal_value
+                    row_values['failing_metric_value'] = metric.fails_on
+                    row_values['metric_lower_bound'] = metric.lower_bound
+                    row_values['metric_upper_bound'] = metric.upper_bound
 
-                threshold_rows.append(row_values)
+                metric_rows.append(row_values)
 
-            rows.extend(threshold_rows)
+            rows.extend(metric_rows)
         return rows
 
     def to_dataframe(self, include_metadata: bool = None) -> pandas.DataFrame:
@@ -731,7 +1055,7 @@ class MetricResults:
         """
         valid_scores: typing.List[Score] = [
             score
-            for score in self.__metric_scores
+            for score in self.scores
             if not (
                     numpy.isnan(score.sample_size)
                     or numpy.isnan(score.value)
@@ -745,11 +1069,21 @@ class MetricResults:
         """
         The maximum value that the total of all underlying scores could return
         """
-        return self.__maximum_valid_score
+        all_weight = sum([
+            scores.metric.weight
+            for scores in self.values()
+            if not numpy.isnan(scores.total)
+        ])
+        return all_weight
 
     @property
     def total(self) -> NUMBER:
-        return self.__total
+        all_scaled_values = sum([
+            scores.scaled_value
+            for scores in self.values()
+            if not numpy.isnan(scores.scaled_value)
+        ])
+        return all_scaled_values
 
     @property
     def performance(self) -> NUMBER:
@@ -760,45 +1094,59 @@ class MetricResults:
         return self.performance * 100.0
 
     def keys(self) -> typing.KeysView:
-        return self.__results.keys()
+        return self.__metrics.keys()
 
     def values(self) -> typing.ValuesView:
-        return self.__results.values()
+        return self.__metrics.values()
+
+    def items(self) -> typing.ItemsView:
+        return self.__metrics.items()
 
     @property
     def weight(self):
         return self.__weight
 
+    @property
+    def metrics(self) -> typing.Sequence[Metric]:
+        return [
+            metric
+            for metric in self.keys()
+        ]
+
+    @property
+    def scores(self) -> typing.Sequence[Score]:
+        master_list: typing.List[Score] = list()
+
+        for scores in self.values():
+            master_list.extend(scores)
+
+        return master_list
+
     def add_scores(self, scores: Scores):
-        description = ScoreDescription(scores)
-
-        if description.has_value:
-            self.__total += description.scaled_value
-            self.__maximum_valid_score += description.weight
-
-            self.update_scaled_value()
-
         for score in scores:  # type: Score
-            self.__metric_scores.append(score)
-            self.__results[score.threshold].append(score)
-            self.__metrics[score.metric.name].append(score)
+            if score.metric not in self.__metrics:
+                self.__metrics[score.metric] = Scores(score.metric)
+            self.__metrics[score.metric].add(score)
 
-    def __getitem__(self, key: str) -> typing.Sequence[Score]:
+    def __getitem__(self, metric_name: str) -> typing.Sequence[Score]:
         result_key = None
-        for threshold in self.__results.keys():
-            if threshold.name.lower() == key.lower():
-                result_key = threshold
+
+        for metric in self.__metrics.keys():
+            if metric.name.lower() == metric_name.lower():
+                result_key = metric
                 break
 
         if result_key:
-            return self.__results[result_key]
+            return self.__metrics[result_key]
 
-        available_thresholds = [threshold.name for threshold in self.__results.keys()]
+        available_metrics = [metric.name for metric in self.metrics]
 
-        raise KeyError(f"There are no thresholds named '{key}'. Available keys are: {', '.join(available_thresholds)}")
+        raise KeyError(
+            f"There are no thresholds named '{metric_name}'. Available keys are: {', '.join(available_metrics)}"
+        )
 
-    def __iter__(self) -> typing.Iterator[typing.Tuple[Threshold, typing.List[Score]]]:
-        return iter(self.__results.items())
+    def __iter__(self) -> typing.Iterator[typing.Tuple[Threshold, Scores]]:
+        return iter(self.__metrics.items())
 
     def __str__(self) -> str:
         return f"Metric Results: {self.scaled_value} ({self.total} out of {self.maximum_valid_score})"
@@ -807,14 +1155,193 @@ class MetricResults:
         return str(self)
 
 
+def run_metric(
+    pairs: pandas.DataFrame,
+    observed_value_label: str,
+    predicted_value_label: str,
+    metric: Metric,
+    current_threshold: Threshold,
+    metadata: dict = None,
+    communicators: CommunicatorGroup = None,
+    calculate_interval: bool = None,
+    *args,
+    **kwargs
+) -> Scores:
+    # TODO: This should call the metric with the current threshold - metrics currently only accept sets of
+    #  thresholds for later slicing and dicing. This should instead send a single threshold so that thresholds
+    #  aren't repeatedly calculated
+    if communicators:
+        communicators.info(f"Calling {metric.name}", verbosity=Verbosity.LOUD, publish=True)
+
+    scores = metric(
+        pairs=pairs,
+        observed_value_label=observed_value_label,
+        predicted_value_label=predicted_value_label,
+        thresholds=current_threshold,
+        *args,
+        **kwargs
+    )
+
+    if communicators and communicators.send_all():
+        message = {
+            "metric": scores.metric.name,
+            "description": scores.metric.get_descriptions(),
+            "weight": scores.metric.weight,
+            "total": scores.total,
+            "scores": scores.to_dict()
+        }
+
+        if metadata:
+            message['metadata'] = metadata
+
+        communicators.write(reason="metric", data=message, verbosity=Verbosity.ALL)
+
+    return scores
+
+
+def run_legacy_metric(
+    metric: Metric,
+    pairs: pandas.DataFrame,
+    observed_value_label: str,
+    predicted_value_label: str,
+    thresholds: typing.Sequence[Threshold],
+    communicators: CommunicatorGroup = None,
+    metadata: dict = None,
+    calculate_interval: bool = None,
+    *args,
+    **kwargs
+) -> Scores:
+    if communicators:
+        communicators.info(f"Calling {metric.name}", verbosity=Verbosity.LOUD, publish=True)
+
+    scores = metric(
+        pairs=pairs,
+        observed_value_label=observed_value_label,
+        predicted_value_label=predicted_value_label,
+        thresholds=thresholds,
+        *args,
+        **kwargs
+    )
+
+    if communicators and communicators.send_all():
+        message = {
+            "metric": scores.metric.name,
+            "description": scores.metric.get_descriptions(),
+            "weight": scores.metric.weight,
+            "total": scores.total,
+            "scores": scores.to_dict()
+        }
+
+        if metadata:
+            message['metadata'] = metadata
+
+        communicators.write(reason="metric", data=message, verbosity=Verbosity.ALL)
+
+    return scores
+
+
 class ScoringScheme(object):
     def __init__(
         self,
         metrics: typing.Sequence[Metric] = None,
-        communicators: CommunicatorGroup = None
+        communicators: typing.Union[typing.Dict[str, Communicator], typing.Sequence[Communicator], CommunicatorGroup] = None,
+        name: str = None,
+        calculate_interval: bool = None
     ):
         self.__metrics = metrics or list()
-        self.__communicators = communicators or CommunicatorGroup()
+        self.__communicators = CommunicatorGroup(communicators=communicators)
+        self.__name = name
+        self.__calculate_interval = bool(calculate_interval)
+
+    def serialize(self) -> typing.Dict[str, typing.Any]:
+        return {
+            "metrics": [
+                metric.serialize()
+                for metric in self.__metrics
+            ],
+            "communicators": self.__communicators.serialize(),
+            "name": self.__name,
+            "calculate_interval": self.__calculate_interval
+        }
+
+    async def score_asynchronously(
+        self,
+        pairs: pandas.DataFrame,
+        observed_value_label: str,
+        predicted_value_label: str,
+        thresholds: typing.Sequence[Threshold] = None,
+        weight: NUMBER = None,
+        metadata: dict = None,
+        distributor: WorkDistributionProtocol = None,
+        *args,
+        **kwargs
+    ) -> MetricResults:
+        if len(self.__metrics) == 0:
+            raise ValueError(
+                "No metrics were attached to the scoring scheme - values cannot be scored and aggregated"
+            )
+
+        run_thresholds_individually = False
+
+        weight = 1 if not weight or numpy.isnan(weight) else weight
+
+        results = MetricResults(weight=weight)
+
+        if thresholds is None:
+            thresholds = [Threshold.default()]
+
+        if distributor is None:
+            distributor = ThreadedWorkDistributor()
+
+        if run_thresholds_individually:
+            wrapper_function = run_metric
+
+            threshold_pairs = {
+                threshold: threshold(pairs)
+                for threshold in thresholds
+            }
+
+            parameters = [
+                {
+                    "pairs": threshold_and_filtered_pairs[1],
+                    "observed_value_label": observed_value_label,
+                    "predicted_value_label": predicted_value_label,
+                    "metric": metric,
+                    "current_threshold": threshold_and_filtered_pairs[0],
+                    "metadata": metadata,
+                    "communicators": self.__communicators,
+                    "calculate_interval": self.__calculate_interval
+                }
+                for metric, threshold_and_filtered_pairs in itertools.product(self.__metrics, threshold_pairs.items())
+            ]
+        else:
+            wrapper_function = run_legacy_metric
+
+            parameters = [
+                {
+                    "pairs": pairs,
+                    "observed_value_label": observed_value_label,
+                    "predicted_value_label": predicted_value_label,
+                    "metric": metric,
+                    "thresholds": thresholds,
+                    "metadata": metadata,
+                    "communicators": self.__communicators,
+                    "calculate_interval": self.__calculate_interval
+                }
+                for metric in self.__metrics
+            ]
+
+        metric_scores = await distributor.perform_asynchronously(
+            function=wrapper_function,
+            parameters=parameters,
+            *args,
+            **kwargs
+        )
+
+        for scores in metric_scores:
+            results.add_scores(scores)
+
+        return results
 
     def score(
         self,
@@ -824,6 +1351,7 @@ class ScoringScheme(object):
         thresholds: typing.Sequence[Threshold] = None,
         weight: NUMBER = None,
         metadata: dict = None,
+        distributor: WorkDistributionProtocol = None,
         *args,
         **kwargs
     ) -> MetricResults:
@@ -832,34 +1360,59 @@ class ScoringScheme(object):
                 "No metrics were attached to the scoring scheme - values cannot be scored and aggregated"
             )
 
+        run_thresholds_individually = False
+
         weight = 1 if not weight or numpy.isnan(weight) else weight
 
         results = MetricResults(weight=weight)
 
-        for metric in self.__metrics:  # type: Metric
-            self.__communicators.info(f"Calling {metric.name}", verbosity=Verbosity.LOUD, publish=True)
-            scores = metric(
-                pairs=pairs,
-                observed_value_label=observed_value_label,
-                predicted_value_label=predicted_value_label,
-                thresholds=thresholds,
-                *args,
-                **kwargs
-            )
-            results.add_scores(scores)
+        if thresholds is None:
+            thresholds = [Threshold.default()]
 
-            if self.__communicators.send_all():
-                message = {
-                    "metric": scores.metric.name,
-                    "description": scores.metric.get_descriptions(),
-                    "weight": scores.metric.weight,
-                    "total": scores.total,
-                    "scores": scores.to_dict()
+        if distributor is None:
+            distributor = SynchronousWorkDistributor()
+
+        if run_thresholds_individually:
+            wrapper_function = run_metric
+
+            threshold_pairs = {
+                threshold: threshold(pairs)
+                for threshold in thresholds
+            }
+
+            parameters = [
+                {
+                    "pairs": threshold_and_filtered_pairs[1],
+                    "observed_value_label": observed_value_label,
+                    "predicted_value_label": predicted_value_label,
+                    "metric": metric,
+                    "current_threshold": threshold_and_filtered_pairs[0],
+                    "metadata": metadata,
+                    "communicators": self.__communicators,
+                    "calculate_interval": self.__calculate_interval
                 }
+                for metric, threshold_and_filtered_pairs in itertools.product(self.__metrics, threshold_pairs.items())
+            ]
+        else:
+            wrapper_function = run_legacy_metric
 
-                if metadata:
-                    message['metadata'] = metadata
+            parameters = [
+                {
+                    "pairs": pairs,
+                    "observed_value_label": observed_value_label,
+                    "predicted_value_label": predicted_value_label,
+                    "metric": metric,
+                    "thresholds": thresholds,
+                    "metadata": metadata,
+                    "communicators": self.__communicators,
+                    "calculate_interval": self.__calculate_interval
+                }
+                for metric in self.__metrics
+            ]
 
-                self.__communicators.write(reason="metric", data=message, verbosity=Verbosity.ALL)
+        metric_scores = distributor.perform(function=wrapper_function, parameters=parameters, *args, **kwargs)
+
+        for scores in metric_scores:
+            results.add_scores(scores)
 
         return results

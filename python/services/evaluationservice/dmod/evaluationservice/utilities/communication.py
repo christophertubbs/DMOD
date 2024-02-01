@@ -296,8 +296,8 @@ class RedisCommunicator(communication.Communicator):
         if verbosity and self._verbosity < verbosity:
             return
 
-        if self.__include_timestamp:
-            timestamp = common.now()
+        if self.include_timestamp:
+            timestamp = common.now().strftime(self.timestamp_format)
             message = f"[{timestamp}] {message}"
 
         self.__connection.rpush(self.__error_key, message)
@@ -324,14 +324,14 @@ class RedisCommunicator(communication.Communicator):
         Args:
             message: The message to record
             verbosity: The significance of the message. If given, the message will only be recorded if the
-                        vebosity matches or exceeds the communicator's verbosity
+                        verbosity matches or exceeds the communicator's verbosity
             publish: Whether the message should be published to the channel
         """
         if verbosity and self._verbosity < verbosity:
             return
 
-        if self.__include_timestamp:
-            timestamp = common.now()
+        if self.include_timestamp:
+            timestamp = common.now().strftime(self.timestamp_format)
             message = f"[{timestamp}] {message}"
 
         self.__connection.rpush(self.__info_key, message)
@@ -395,13 +395,7 @@ class RedisCommunicator(communication.Communicator):
         # Publish and indent by 4 for later readability
         self.__connection.publish(self.__channel_name, to_json(message, indent=4))
 
-        try:
-            for handler in self._handlers.get('write', []):
-                handler(message)
-        except:
-            # Leave room for a breakpoint
-            pass
-            raise
+        self.handle_event("write", message)
 
     def read(self) -> typing.Any:
         """
@@ -454,7 +448,10 @@ class RedisCommunicator(communication.Communicator):
             communicator_id=communicator_id,
             verbosity=verbosity,
             on_receive=on_receive,
-            handlers=handlers, **kwargs
+            handlers=handlers,
+            include_timestamp=include_timestamp,
+            timestamp_format=timestamp_format,
+            **kwargs
         )
         self.__core_key = make_key(redis_prefix(), communicator_id)
         self.__channel_name = get_channel_key(communicator_id)
@@ -468,8 +465,6 @@ class RedisCommunicator(communication.Communicator):
         self.__listener = None
         self.__timeout = timeout or 0
         self.__has_sunset = False
-        self.__include_timestamp = include_timestamp if include_timestamp is not None else False
-        self.__timestamp_format = timestamp_format or application_values.COMMON_DATETIME_FORMAT
 
         if 'receive' in self._handlers:
             self.__publisher_and_subscriber = self.__connection.pubsub()

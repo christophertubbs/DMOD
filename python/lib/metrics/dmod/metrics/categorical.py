@@ -230,7 +230,7 @@ class CategoricalMetricMetadata(object):
         return self.__greater_is_better
 
 
-class TruthTable(object):
+class TruthTable:
     """
     Represents and calculates the categorical metrics for a single threshold
     """
@@ -321,7 +321,7 @@ class TruthTable(object):
         # true negatives: contingency_table[False][False]
         # False Positives: contingency_table[False][True]
         #
-        contingency_table = pandas.crosstab(predicted_values_that_matter.values, observed_values_that_matter.values)
+        contingency_table = pandas.crosstab(predicted_values_that_matter, observed_values_that_matter)
 
         # Store evaluated parameters so they don't have to be evaluated multiple times
         self.__hits = 0
@@ -598,9 +598,6 @@ class TruthTable(object):
             How well did the predicted values accurately fit within the threshold, accounting for hits
             due to chance
         """
-        if not self.is_useful:
-            return numpy.nan
-
         if not numpy.isnan(self.__equitable_threat_score):
             return self.__equitable_threat_score
 
@@ -617,7 +614,7 @@ class TruthTable(object):
         top = self.__hits - random_hits
         bottom = self.__hits + self.__misses + self.__false_positives - random_hits
 
-        if 0 in (top, bottom):
+        if bottom == 0:
             return numpy.nan
         if top == bottom:
             self.__equitable_threat_score = 1.0
@@ -637,9 +634,6 @@ class TruthTable(object):
         Returns:
             The accuracy of the forecast relative to that of random chance
         """
-        if not self.is_useful:
-            return numpy.nan
-
         if not numpy.isnan(self.__general_skill):
             return self.__general_skill
 
@@ -659,9 +653,6 @@ class TruthTable(object):
 
     @categorical_metric(minimum=0.0, maximum=1.0, ideal=1.0)
     def precision(self) -> float:
-        if not self.is_useful:
-            return numpy.nan
-
         if not numpy.isnan(self.__precision):
             return self.__precision
 
@@ -720,6 +711,12 @@ class TruthTable(object):
 
     def __len__(self):
         return self.__size
+
+    def __str__(self):
+        return f"Table for {self.name} => "
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class TruthTables(object):

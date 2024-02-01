@@ -1081,6 +1081,19 @@ def humanize_text(
 
 
 def instanceof(obj: object, *object_type: type) -> bool:
+    """
+    Alternate implementation of `isinstance` that has support for generics
+
+    Args:
+        obj: The object to check
+        *object_type: The types of objects to compare against
+
+    Returns:
+        Whether `obj` has a type indicated within `*object_type`
+    """
+    if len(object_type) == 0:
+        raise Exception(f"No types were passed to compare to")
+
     try:
         return isinstance(obj, object_type)
     except:
@@ -1092,6 +1105,44 @@ def instanceof(obj: object, *object_type: type) -> bool:
 
     for definition in type_definitions:
         if definition.matches(value=obj):
+            return True
+
+    return False
+
+
+def exists(collection: typing.Iterable[_CLASS_TYPE], condition: typing.Callable[[_CLASS_TYPE], bool] = None) -> bool:
+    """
+    Checks to see if at least one item in the collection matches the given condition
+
+    This differs from `any` in that the condition is baked into the call and it avoids checks like:
+
+    Examples:
+        >>> import random
+        >>> import math
+        >>> value = 3
+        >>> values = [random.randrange(value, value**2) for value in range(100)]
+        >>> any([
+                math.sqrt(value) == 3
+                for value in values
+            ])
+        >>> len([
+                value
+                for value in values
+                if math.sqrt(value) == 3
+            ]) > 0
+        >>> exists(values, lambda value: math.sqrt(value) == 3)
+    Args:
+        collection:
+        condition:
+
+    Returns:
+
+    """
+    if condition is None or not isinstance(collection, typing.Iterable):
+        return bool(collection)
+
+    for entry in collection:
+        if condition(entry):
             return True
 
     return False
