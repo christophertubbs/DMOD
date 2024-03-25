@@ -14,6 +14,7 @@ from dmod.core.common import CatalogEntry
 from dmod.core.common import CollectionEvent
 from dmod.core.common import InputCatalog
 from dmod.core.common.collections.catalog import hash_hashable_map_sequence
+from dmod.core.events import Event
 
 GLOBAL_ACCESS_RECORD = []
 GLOBAL_REMOVAL_RECORD = []
@@ -93,7 +94,7 @@ A collection of data that will be used within the unit tests for asynchronous op
 """
 
 
-def add_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+def add_record(event: Event[InputCatalog], key, value):
     GLOBAL_ADDITION_RECORD.append(ActionRecord(
         event=CollectionEvent.SET,
         id=key,
@@ -101,7 +102,7 @@ def add_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
     ))
 
 
-async def async_add_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+async def async_add_record(event: Event[InputCatalog] = None, key=None, value=None):
     GLOBAL_ASYNC_ADDITION_RECORD.append(ActionRecord(
         event=CollectionEvent.SET,
         id=key,
@@ -109,7 +110,7 @@ async def async_add_record(mapping: typing.MutableMapping[str, CatalogEntry], ke
     ))
 
 
-def remove_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+def remove_record(event: Event[InputCatalog], key, value):
     GLOBAL_REMOVAL_RECORD.append(ActionRecord(
         event=CollectionEvent.DELETE,
         id=key,
@@ -117,7 +118,7 @@ def remove_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value)
     ))
 
 
-async def async_remove_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+async def async_remove_record(event: Event[InputCatalog], key, value):
     GLOBAL_ASYNC_REMOVAL_RECORD.append(ActionRecord(
         event=CollectionEvent.DELETE,
         id=key,
@@ -125,14 +126,14 @@ async def async_remove_record(mapping: typing.MutableMapping[str, CatalogEntry],
     ))
 
 
-def update_access_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+def update_access_record(event: Event[InputCatalog], key, value):
     GLOBAL_ACCESS_RECORD.append(AccessRecord(
         event=CollectionEvent.GET,
         id=key
     ))
 
 
-def async_update_access_record(mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+def async_update_access_record(event: Event[InputCatalog] = None, key = None, value = None):
     GLOBAL_ASYNC_ACCESS_RECORD.append(AccessRecord(
         event=CollectionEvent.GET,
         id=key
@@ -175,14 +176,14 @@ class TestInputCatalog(unittest.IsolatedAsyncioTestCase):
             async_update_access_record
         )
 
-    def add_record_method(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    def add_record_method(self, event: Event[InputCatalog], key, value):
         self.addition_record.append(ActionRecord(
             event=CollectionEvent.SET,
             id=key,
             data=value
         ))
 
-    async def async_add_record_method(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    async def async_add_record_method(self, event: Event[InputCatalog], key, value):
         self.async_addition_record.append(ActionRecord(
             event=CollectionEvent.SET,
             id=key,
@@ -190,7 +191,7 @@ class TestInputCatalog(unittest.IsolatedAsyncioTestCase):
         ))
 
 
-    def remove_record_method(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    def remove_record_method(self, event: Event[InputCatalog], key, value):
         self.removal_record.append(ActionRecord(
             event=CollectionEvent.DELETE,
             id=key,
@@ -198,20 +199,20 @@ class TestInputCatalog(unittest.IsolatedAsyncioTestCase):
         ))
 
 
-    async def async_remove_record_method(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    async def async_remove_record_method(self, event: Event[InputCatalog], key, value):
         self.async_removal_record.append(ActionRecord(
             event=CollectionEvent.DELETE,
             id=key,
             data=value
         ))
 
-    def update_access_record(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    def update_access_record(self, event: Event[InputCatalog], key, value):
         self.access_record.append(AccessRecord(
             event=CollectionEvent.GET,
             id=key
         ))
 
-    def async_update_access_record(self, mapping: typing.MutableMapping[str, CatalogEntry], key, value):
+    def async_update_access_record(self, event: Event[InputCatalog], key, value):
         self.async_access_record.append(AccessRecord(
             event=CollectionEvent.GET,
             id=key

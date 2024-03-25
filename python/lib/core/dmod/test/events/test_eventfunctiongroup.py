@@ -3,6 +3,7 @@ Tests for dmod.core.events.EventFunctionGroup
 """
 from __future__ import annotations
 
+import sys
 import typing
 import unittest
 
@@ -10,7 +11,7 @@ from ...core.events.base_function import EventFunctionParameter
 from ...core.events.base_function import EventFunctionGroup
 from ...core.events.base_function import Event
 
-EVENT = Event("click")
+EVENT = Event("click", caller=sys.modules[__name__])
 ARG1 = 1
 ARG2 = 4
 ARG3 = True
@@ -78,7 +79,7 @@ class TestEventFunctionGroup(unittest.IsolatedAsyncioTestCase):
 
     async def test_eventfunctiongroup(self):
         self.assertRaises(
-            ValueError,
+            TypeError,
             EventFunctionGroup,
             EXPECTED_PARAMETERS,
             self.async_method,
@@ -110,7 +111,7 @@ class TestEventFunctionGroup(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(built_group.signature_matches(async_test_function))
         self.assertTrue(built_group.signature_matches(test_function))
 
-        invalid_functions = list()
+        invalid_functions = []
 
         built_group.add_function(self.async_method, invalid_functions)
         self.assertEqual(len(invalid_functions), 0)
@@ -124,10 +125,10 @@ class TestEventFunctionGroup(unittest.IsolatedAsyncioTestCase):
         built_group.add_function(test_function, invalid_functions)
         self.assertEqual(len(invalid_functions), 0)
 
-        built_group.add_function(invalid_function, invalid_functions)
+        built_group.add_function(invalid_function, invalid_functions, allow_errors=True)
         self.assertEqual(len(invalid_functions), 1)
 
-        built_group.add_function(self.invalid_method, invalid_functions)
+        built_group.add_function(self.invalid_method, invalid_functions, allow_errors=True)
         self.assertEqual(len(invalid_functions), 2)
 
         leftover_coroutines = predefined_group(EVENT, ARG1, ARG2, ARG3, arg4=ARG4, arg5=ARG5)

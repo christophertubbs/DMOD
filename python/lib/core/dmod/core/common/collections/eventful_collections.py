@@ -3,15 +3,18 @@
 """
 from __future__ import annotations
 
-import inspect
 import typing
 import abc
+
+from collections.abc import MutableMapping
 
 from typing_extensions import Self
 
 from .constants import CollectionEvent
-from .constants import MapHandler
 from .constants import SequenceHandler
+from ...events import Event
+from ...events import EventRouter
+from ...events.base_function import Signature
 
 _T = typing.TypeVar("_T")
 _KT = typing.TypeVar("_KT", bound=typing.Hashable, covariant=True)
@@ -21,12 +24,12 @@ _VT = typing.TypeVar("_VT")
 SENTINEL = object()
 
 
-class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_KT, _VT]):
+class EventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_KT, _VT]):
     """
     Base class for a map that has event handlers for basic actions
     """
     @classmethod
-    def instantiate_cache(cls) -> typing.MutableMapping[_KT, _VT]:
+    def instantiate_map(cls) -> typing.MutableMapping[_KT, _VT]:
         """
         Create the wrapped structure for this map
 
@@ -37,16 +40,39 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
         """
         return {}
 
-    @abc.abstractmethod
-    def get_handlers(self) -> typing.Dict[CollectionEvent, typing.MutableSequence[typing.Callable]]:
-        """
-        Get all registered event handlers
+    def __init__(self, inner_map: typing.MutableMapping[_KT, _VT] = None, **kwargs):
+        if isinstance(inner_map, typing.MutableMapping):
+            self._inner_map = inner_map
+        elif isinstance(inner_map, typing.Mapping):
+            self._inner_map = self.instantiate_map()
+            self._inner_map.update(inner_map)
+        else:
+            self._inner_map = self.instantiate_map()
 
-        Returns:
-            A dictionary mapping event types to a list of handlers
-        """
+        self._inner_map.update(kwargs)
 
-    @abc.abstractmethod
+        common_signature = Signature([
+            {"name": "event", "type": Event, "required": True},
+            {"name": "key", "required": True},
+            {"name": "value", "required": True}
+        ])
+
+        self.__event_router = EventRouter(
+            events={
+                CollectionEvent.GET: common_signature,
+                CollectionEvent.SET: common_signature,
+                CollectionEvent.POP: common_signature,
+                CollectionEvent.DELETE: common_signature,
+                CollectionEvent.UPDATE: [
+                    {"name": "event", "type": Event, "required": True},
+                    {"name": "new_data", "type": MutableMapping}
+                ],
+                CollectionEvent.CLEAR: [
+                    {"name": "event", "type": Event, "required": True}
+                ]
+            }
+        )
+
     def inner_map(self) -> typing.MutableMapping[_KT, _VT]:
         """
         Get the inner map that this wraps
@@ -54,24 +80,13 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
         Returns:
             The raw data that lies underneath the wrapping for event handling
         """
+        return self._inner_map
 
-    @abc.abstractmethod
-    def _get_leftover_tasks(self) -> typing.MutableSequence[typing.Awaitable[_KT]]:
-        """
-        A listing of asynchronous tasks that have yet to be awaited
-        """
-
-    async def commit(self):
+    async def complete_active_tasks(self):
         """
         Complete all asynchronous tasks that have yet to be awaited
         """
-
-        while self._get_leftover_tasks():
-            task = self._get_leftover_tasks().pop()
-            result = await task
-
-            if inspect.isawaitable(result):
-                self._get_leftover_tasks().append(result)
+        await self.__event_router.complete_active_tasks()
 
     def add_handler(self, event_type: typing.Union[CollectionEvent, str], *handlers: typing.Callable):
         """
@@ -82,31 +97,19 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
             handlers: Functions to call when the event is triggered
         """
         event_type = CollectionEvent.get(event_type) if isinstance(event_type, str) else event_type
-
-        if event_type not in self.get_handlers():
-            self.get_handlers()[event_type] = []
-
-        for handler in handlers:
-            if handler not in self.get_handlers()[event_type]:
-                self.get_handlers()[event_type].append(handler)
+        self.__event_router.register_handler(event=event_type, handler=handlers)
 
     def get(self, __key: _KT, default=None):
         value = self.inner_map().get(__key, SENTINEL)
 
         if value is not SENTINEL:
-            handlers: typing.Iterable[MapHandler.GET] = self.get_handlers().get(CollectionEvent.GET, [])
-
-            for handler in handlers:
-                handler(self, __key, value)
-
+            self.handle(CollectionEvent.GET, __key, value)
             return value
 
         return default
 
     def clear(self) -> None:
-        handlers: typing.Iterable[MapHandler.CLEAR] = self.get_handlers().get(CollectionEvent.CLEAR, [])
-        for handler in handlers:
-            handler(self)
+        self.handle(CollectionEvent.CLEAR, self)
         return self.inner_map().clear()
 
     def items(self) -> typing.ItemsView[str, _VT]:
@@ -119,47 +122,27 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
         return self.inner_map().values()
 
     def pop(self, __key: _KT, default=None) -> typing.Optional[_VT]:
-        handlers: typing.Iterable[MapHandler.POP] = self.get_handlers().get(CollectionEvent.POP, [])
-        for handler in handlers:
-            handler(self, __key)
-        return self.inner_map().pop(__key, default)
+        popped_value = self.inner_map().pop(__key, SENTINEL)
+
+        if popped_value is SENTINEL:
+            return default
+
+        self.handle(CollectionEvent.POP, __key, popped_value)
+        return popped_value
 
     def popitem(self) -> tuple[_KT, _VT]:
-        handlers: typing.Iterable[MapHandler.POP] = self.get_handlers().get(CollectionEvent.POP, [])
-        for handler in handlers:
-            handler(self, None)
-        return self.inner_map().popitem()
+        key, value = self.inner_map().popitem()
+        self.handle(CollectionEvent.POP, key, value)
+        return key, value
 
     def setdefault(self, __key: _KT, __default: _VT = ...) -> typing.Optional[_VT]:
         return self.inner_map().setdefault(__key, __default)
 
-    def handle(self, event: typing.Union[str, CollectionEvent], *args, **kwargs):
-        handlers: typing.Iterable[typing.Callable] = self.get_handlers().get(event, [])
+    def handle(self, event_name: str, *args, **kwargs):
+        self.__event_router.trigger(event_name, caller=self, *args, **kwargs)
 
-        for handler in handlers:
-            result = handler(*args, **kwargs)
-
-            if inspect.isawaitable(result):
-                self._get_leftover_tasks().append(result)
-
-    async def trigger(self, event: typing.Union[str, CollectionEvent], *args, **kwargs):
-        handlers: typing.Iterable[typing.Callable] = self.get_handlers().get(event, [])
-
-        handlers_to_wait_for: typing.List[typing.Awaitable] = []
-
-        for handler in handlers:
-            result = handler(*args, **kwargs)
-
-            if inspect.isawaitable(result):
-                handlers_to_wait_for.append(result)
-
-        while handlers_to_wait_for:
-            handler_result = handlers_to_wait_for.pop()
-
-            result = await handler_result
-
-            if inspect.isawaitable(result):
-                handlers_to_wait_for.append(result)
+    async def fire(self, event_name: str, *args, **kwargs):
+        await self.__event_router.fire(event_name, caller=self, *args, **kwargs)
 
     def update(self, __m: typing.Mapping[_KT, _VT], **kwargs: _VT) -> None:
         """
@@ -169,21 +152,21 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
             __m: The map to add to this
             **kwargs: Any extra arguments
         """
-        self.handle(CollectionEvent.UPDATE, self, __m)
+        self.handle(CollectionEvent.UPDATE, __m)
         return self.inner_map().update(__m, **kwargs)
 
     def __setitem__(self, __k: _KT, __v: _VT) -> None:
-        self.handle(CollectionEvent.SET, self, __k, __v)
+        self.handle(CollectionEvent.SET, __k, __v)
         self.inner_map()[__k] = __v
 
     def __delitem__(self, __v: _KT) -> None:
         value = self.inner_map()[__v]
-        self.handle(CollectionEvent.DELETE, self, __v, value)
+        self.handle(CollectionEvent.DELETE, __v, value)
         del self.inner_map()[__v]
 
     def __getitem__(self, __k: _KT) -> _VT:
         value = self.inner_map()[__k]
-        self.handle(CollectionEvent.GET, self, __k, value)
+        self.handle(CollectionEvent.GET, __k, value)
         return value
 
     def __iter__(self):
@@ -199,43 +182,7 @@ class BaseEventfulMap(abc.ABC, typing.MutableMapping[_KT, _VT], typing.Generic[_
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.commit()
-
-
-class EventfulMap(BaseEventfulMap[_KT, _VT], typing.Generic[_KT, _VT]):
-    """
-    The most basic implementation of a BaseEventfulMap
-    """
-
-    def _get_leftover_tasks(self) -> typing.MutableSequence[typing.Awaitable[_KT]]:
-        return self.__leftover_tasks
-
-    def __init__(self, contents: typing.Dict[_KT, _VT] = None, **kwargs):
-        """
-        Constructor
-
-        Note: Any event handlers passed via kwargs or contents will NOT be added to the set of handlers
-
-        Args:
-            contents: A preexisting collection of items to put in the map
-            **kwargs: Any key-value pairs that might also fit within the map
-        """
-        self.__handlers: typing.Dict[CollectionEvent, typing.List[typing.Callable]] = {}
-        """The handlers for individual events"""
-
-        self.__contents: typing.Dict[_KT, _VT] = self.instantiate_cache()
-        """The items contained within the map"""
-
-        self.__leftover_tasks: typing.List[typing.Awaitable[_KT]] = []
-
-        self.__contents.update(contents or {})
-        self.__contents.update(dict(kwargs))
-
-    def get_handlers(self) -> typing.Dict[CollectionEvent, typing.MutableSequence[typing.Callable]]:
-        return self.__handlers
-
-    def inner_map(self) -> typing.MutableMapping[_KT, _VT]:
-        return self.__contents
+        await self.complete_active_tasks()
 
 
 class BaseEventfulSequence(abc.ABC, typing.MutableSequence[_T], typing.Generic[_T]):

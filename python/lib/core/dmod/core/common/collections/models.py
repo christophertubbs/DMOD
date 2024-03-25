@@ -8,7 +8,7 @@ import typing
 import pydantic
 from pydantic.generics import GenericModel
 
-from .eventful_collections import BaseEventfulMap
+from .eventful_collections import EventfulMap
 from .eventful_collections import BaseEventfulSequence
 
 from .constants import CollectionEvent
@@ -21,7 +21,7 @@ HandlerMap = typing.Dict[CollectionEvent, typing.List[typing.Callable]]
 TaskList = typing.List[typing.Awaitable]
 
 
-class MapModel(GenericModel, BaseEventfulMap[KeyType, ValueType], typing.Generic[KeyType, ValueType]):
+class MapModel(GenericModel, EventfulMap[KeyType, ValueType], typing.Generic[KeyType, ValueType]):
     def get_handlers(self) -> typing.Dict[CollectionEvent, typing.MutableSequence[typing.Callable]]:
         return self._handlers
 
