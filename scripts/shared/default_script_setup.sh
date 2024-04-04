@@ -20,7 +20,7 @@ if [ -z "${_SHARED_FUNCS_ABSOLUTE_DIR:-}" ]; then
         exit 1
     fi
     # Then set the analogous variable that will always be an absolute path
-    _SHARED_FUNCS_ABSOLUTE_DIR="$(cd "${SHARED_FUNCS_DIR}"; pwd)"
+    _SHARED_FUNCS_ABSOLUTE_DIR="$(cd "${SHARED_FUNCS_DIR}" || return; pwd)"
 fi
 # The value of _SHARED_FUNCS_ABSOLUTE_DIR should only ever be set once and always be valid (since it is absolute)
 # Go ahead and re-set SHARED_FUNCS_DIR to the absolute path also (protects from any problems from double-sourcing)
@@ -29,7 +29,7 @@ SHARED_FUNCS_DIR="${_SHARED_FUNCS_ABSOLUTE_DIR:?}"
 # Keep track of the working directory for the parent shell at the time the script was called
 # Make sure if we double-source this that the value below doesn't get reset
 if [ -z "${STARTING_DIR:-}" ]; then
-    STARTING_DIR="`pwd`"
+    STARTING_DIR=$(pwd)
 fi
 
 # Helper script, useful when local variables aren't a thing, that receives a value (implied to be the return code of
@@ -54,11 +54,37 @@ set_project_root()
 {
     if git rev-parse --show-toplevel > /dev/null 2>&1; then
         PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+        return 0
     else
-        cd "${SHARED_FUNCS_DIR}"
+        cd "${SHARED_FUNCS_DIR}" || return 1
         PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
-        cd "${STARTING_DIR}"
+        cd "${STARTING_DIR}" || return 1
+        return 0
     fi
+
+    # If not project root was found, climb the directory tree to try to find a directory named some form of DmOd
+    # that has a 'python' and 'scripts' directory
+    if [ -z "$PROJECT_ROOT" ]; then
+        path=$(realpath .);
+
+        while [ "$path" != "/" ]; do
+            # Get the base name of the directory in lower case - for something like 'Path/To/DiReCtOrY', this will yield
+            # 'directory'
+            lowercase_base=$(basename "$path" | tr "[:upper:]" "[:lower:]")
+
+            # Check if the directory name is some form of 'dmod' and that it contains a 'scripts' and 'python' directory
+            if [ "$lowercase_base" = "dmod" ] && [ -d "${path}/scripts" ] && [ -d "${path}/python" ]; then
+                # If it exists, echo the path so it may be caught by the caller and exit the function
+                echo "$path"
+                return 0;
+            fi
+
+            # Reassign path investigate the parent
+            path=$(dirname "$path");
+        done
+    fi
+
+    return 1;
 }
 
 # Make sure if we double-source this that the values below don't get reset

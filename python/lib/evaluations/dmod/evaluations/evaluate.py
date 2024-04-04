@@ -56,7 +56,7 @@ class UnitConverter:
         )
 
 
-def convert_row_to_desired_data_type(field: specification.AssociatedField, column_name_and_value: pandas.Series):
+def convert_row_to_desired_data_type(column_name_and_value: pandas.Series, field: specification.AssociatedField):
     """
     Converts a series of column names vs values to the desired data type
 
@@ -67,7 +67,7 @@ def convert_row_to_desired_data_type(field: specification.AssociatedField, colum
     Returns:
         The converted value
     """
-    converted_value = field.to_datatype(list(column_name_and_value))
+    converted_value = field.to_datatype(value for value in column_name_and_value)
     return converted_value
 
 
@@ -434,37 +434,19 @@ class Evaluator:
             index_fields = []
 
             if observation_rule and observation_rule.name not in data.keys():
-                def conversion_function(column_name_and_value: pandas.Series):
-                    """
-                    Converts a series of column names vs values to the desired data type
-
-                    Args:
-                        column_name_and_value:
-                            A pandas Series mapping column names to values
-                    Returns:
-                        The converted value
-                    """
-                    converted_value = observation_rule.to_datatype([value for value in column_name_and_value])
-                    return converted_value
-
-                data[observation_rule.name] = data[observation_rule.path].apply(conversion_function, axis=1)
+                data[observation_rule.name] = data[observation_rule.path].apply(
+                    convert_row_to_desired_data_type,
+                    axis=1,
+                    field=observation_rule
+                )
                 index_fields.append(observation_rule.name)
 
             if prediction_rule and prediction_rule.name not in data.keys():
-                def conversion_function(column_name_and_value: pandas.Series):
-                    """
-                    Converts a series of column names vs values to the desired data type
-
-                    Args:
-                        column_name_and_value:
-                            A pandas Series mapping column names to values
-                    Returns:
-                        The converted value
-                    """
-                    converted_value = prediction_rule.to_datatype([value for value in column_name_and_value])
-                    return converted_value
-
-                data[prediction_rule.name] = data[prediction_rule.path].apply(conversion_function, axis=1)
+                data[prediction_rule.name] = data[prediction_rule.path].apply(
+                    convert_row_to_desired_data_type,
+                    axis=1,
+                    field=prediction_rule
+                )
                 index_fields.append(prediction_rule.name)
 
             data = data.set_index(keys=index_fields, drop=True)

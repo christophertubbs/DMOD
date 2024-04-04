@@ -229,8 +229,10 @@ class Serializable(BaseModel, ABC):
             if value is None or converter is None:
                 raise RuntimeError('caught and another thrown in except')
             converted_value = converter(value)
-        except:
-            raise RuntimeError(cls._get_invalid_type_message().format(key, expected_type, value.__class__.__name__))
+        except BaseException as any_exception:
+            raise RuntimeError(
+                cls._get_invalid_type_message().format(key, expected_type, value.__class__.__name__)
+            ) from any_exception
         # Sanity check that the converted value is of the correct type
         if not isinstance(converted_value, expected_type):
             msg = 'Received and used converter callable for parsing serialized JSON that outputs wrong type - '

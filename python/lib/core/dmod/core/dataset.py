@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import logging
+import pathlib
 import typing
 from abc import ABC, abstractmethod
+
+import minio
+import requests
+from urllib3 import HTTPResponse
+
 from .meta_data import ContinuousRestriction, DataCategory, DataDomain, DataFormat, DiscreteRestriction, \
     StandardDatasetIndex, TimeRange
 from .exception import DmodRuntimeError
@@ -531,6 +538,104 @@ class DatasetManager(ABC):
 
     # TODO: implement functions and routines for scrubbing temporary datasets as needed
 
+    def copy_from_request(
+        self,
+        url: str,
+        dataset_name: str,
+        dest: typing.Union[str, pathlib.Path],
+        is_temp: bool = False,
+        *,
+        request_arguments: typing.Dict[str, typing.Any] = None,
+        **kwargs
+    ) -> bool:
+        """
+        Copy data into a dataset from a web request
+
+        Args:
+            url: The URL to pull data from
+            dataset_name: The name of the dataset to add the data to
+            dest: Where the data should be stored within the dataset
+            is_temp: Whether the data should have a short lifespan
+            method: The HTTP method used to retrieve data
+            request_arguments: Parameters to use when retrieving data
+            **kwargs: Additional parameters to send to the data addition function
+
+        Returns:
+            True if data was added
+        """
+        if request_arguments is None:
+            request_arguments: typing.Dict[str, typing.Any] = {}
+
+        request_arguments.setdefault("method", "get")
+        request_arguments.setdefault("stream", True)
+
+        request_arguments['url'] = url
+        with requests.request(**request_arguments) as response:
+            return self.add_data(
+                dataset_name=dataset_name,
+                dest=dest,
+                is_temp=is_temp,
+                data=response.content,
+                **kwargs
+            )
+
+    def copy_from_bucket(
+        self,
+        s3_client: minio.Minio,
+        bucket_name: str,
+        object_name: str,
+        dataset_name: str,
+        dest: typing.Union[str, pathlib.Path],
+        is_temp: bool = False,
+        s3_arguments: typing.Dict[str, typing.Any] = None,
+        **kwargs
+    ) -> bool:
+        """
+        Copy data from an S3 bucket into a dataset
+
+        Args:
+            s3_client: A client used to connect to the target S3 instance
+            bucket_name: The name of the bucket to retrieve the data from
+            object_name: The name of the object within the S3 bucket
+            dataset_name: The name of the dataset to add the data to
+            dest: Where to put the data within the bucket
+            is_temp: Whether the copied data should have a short lifespan
+            s3_arguments: Arguments to send to the S3 client when retrieving data
+            **kwargs: Additional arguments to send along with the data addition process
+
+        Returns:
+            True if data was added
+        """
+        if s3_arguments is None:
+            s3_arguments = {}
+
+        if not s3_client.bucket_exists(bucket_name):
+            raise KeyError(f"Bucket {bucket_name} does not exist in '{s3_client._base_url._url.geturl()}'")
+
+        found_data: typing.Optional[HTTPResponse] = None
+        data: typing.Optional[bytes] = None
+
+        try:
+            found_data = s3_client.get_object(bucket_name=bucket_name, object_name=object_name, **s3_arguments)
+            data = found_data.data
+        finally:
+            if found_data is not None and not found_data.closed:
+                try:
+                    found_data.close()
+                except BaseException as close_exception:
+                    logging.error(
+                        "Could not close connection to content data from "
+                        f"'{s3_client._base_url._url.geturl()}:{bucket_name}/{object_name}'",
+                        exc_info=close_exception
+                    )
+
+        if not data:
+            raise KeyError(
+                f"Data could not be found in '{s3_client._base_url._url.geturl()}:{bucket_name}/{object_name}'"
+            )
+
+        return self.add_data(dataset_name=dataset_name, dest=dest, data=data, is_temp=is_temp, **kwargs)
+
     @abstractmethod
     def add_data(self, dataset_name: str, dest: str, data: Optional[Union[bytes, Reader]] = None, source: Optional[str] = None,
                  is_temp: bool = False, **kwargs) -> bool:
@@ -563,7 +668,6 @@ class DatasetManager(ABC):
         bool
             Whether the data was added successfully.
         """
-        pass
 
     @abstractmethod
     def combine_partials_into_composite(self, dataset_name: str, item_name: str, combined_list: List[str]) -> bool:
@@ -603,7 +707,6 @@ class DatasetManager(ABC):
         Dataset
             A newly created dataset instance ready for use.
         """
-        pass
 
     def create_temporary(self, expires_on: Optional[datetime] = None, **kwargs) -> Dataset:
         """
