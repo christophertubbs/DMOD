@@ -762,7 +762,7 @@ def get_subclasses(base: typing.Type[_CLASS_TYPE]) -> typing.List[typing.Type[_C
 def on_each(
     func: typing.Callable[[_CLASS_TYPE], typing.Any],
     collection: typing.Iterable[_CLASS_TYPE]
-) -> typing.NoReturn:
+) -> None:
     """
     Calls the passed in function on every item in the collection. The input collection is not mutated
 

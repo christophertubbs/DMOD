@@ -1,11 +1,18 @@
+"""
+Defines the base class used to retrieve data based on information read from a definition object
+"""
+import typing
 import abc
 
-import pandas
+import polars
 
 from . import backends
 
 
 class Retriever(abc.ABC):
+    """
+    The base class for a mechanism that may be used to read input data
+    """
     def __init__(self, definition):
         self._definition = definition
         self._backend = backends.get_backend(definition.backend)
@@ -17,7 +24,13 @@ class Retriever(abc.ABC):
         Returns:
             What type of data this retriever is supposed to get
         """
-        ...
+
+    @classmethod
+    def default_read_parameters(cls) -> typing.Dict[str, typing.Any]:
+        """
+        Default keyword arguments used when loading data through this class' retrieve function
+        """
+        return {}
 
     @property
     @abc.abstractmethod
@@ -26,7 +39,6 @@ class Retriever(abc.ABC):
         Returns:
             The specification for this retriever
         """
-        ...
 
     @property
     def backend(self) -> backends.Backend:
@@ -37,14 +49,13 @@ class Retriever(abc.ABC):
         return self._backend
 
     @abc.abstractmethod
-    def retrieve(self, *args, **kwargs) -> pandas.DataFrame:
+    def retrieve(self, **kwargs) -> polars.DataFrame:
         """
         Reads and interprets data based on the configuration
 
         Returns:
             A dataframe containing all configured information
         """
-        ...
 
     @classmethod
     @abc.abstractmethod
@@ -53,4 +64,3 @@ class Retriever(abc.ABC):
         Returns:
             The name of the format that this retriever retrieves
         """
-        ...

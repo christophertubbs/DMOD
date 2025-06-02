@@ -249,7 +249,7 @@ class Metrics(APIView):
         name_and_metadata = {
             metric.name: {
                 "ideal_value": metric.ideal_value,
-                "description": metric.get_descriptions(),
+                "description": metric.get_description(),
                 "identifier": metric.get_identifier()
             }
             for metric in instantiated_metrics

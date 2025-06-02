@@ -21,12 +21,10 @@ from . import backend
 from .. import util
 from .. import specification
 
-util.configure_logging()
 
-
-RE_PATTERN = re.compile(r"(\{.+\}|\[.+\]|\(.+\)|(?<!\\)\.|\{|\}|\]|\[|\(|\)|\+|\*|\\[a-zA-Z]|\?)+")
+RE_PATTERN = re.compile(r"(\{.+}|\[.+]|\(.+\)|(?<!\\)\.|\{|}|]|\[|\(|\)|\+|\*|\\[a-zA-Z]|\?)+")
 MULTI_GLOB_PATTERN = re.compile(r"\*+")
-EXPLICIT_START_PATTERN = re.compile(r"^(~|\.)?/.*$")
+EXPLICIT_START_PATTERN = re.compile(r"^([~.])?/.*$")
 
 
 class FileBackend(backend.Backend):

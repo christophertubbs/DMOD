@@ -40,7 +40,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.KlingGuptaEfficiency(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -66,7 +66,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.PearsonCorrelationCoefficient(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -92,7 +92,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.NormalizedNashSutcliffeEfficiency(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -118,7 +118,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.VolumeError(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertFalse(metric.bounded)
@@ -147,7 +147,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.ProbabilityOfDetection(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -173,7 +173,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.FalseAlarmRatio(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -199,7 +199,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.FrequencyBias(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -226,7 +226,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.Accuracy(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -252,7 +252,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.CriticalSuccessIndex(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -278,7 +278,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.EquitableThreatScore(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -304,7 +304,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.GeneralSkill(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)
@@ -330,7 +330,7 @@ class TestMetadata(unittest.TestCase):
         """
         metric = metrics.Precision(1)
         self.assertEqual(metric.weight, 1)
-        self.assertTrue(len(metric.get_descriptions()) > 10)
+        self.assertTrue(len(metric.get_description()) > 10)
         self.assertTrue(len(metric.get_name()) > 5)
 
         self.assertTrue(metric.bounded)

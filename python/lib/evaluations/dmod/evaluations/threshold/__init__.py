@@ -24,6 +24,15 @@ from .. import retrieval
 
 
 def get_threshold_retriever(threshold_definition: specification.ThresholdSpecification) -> retrieval.Retriever:
+    """
+    Crafts an object that can read threshold data from its source
+
+    Args:
+        threshold_definition: Information about where threshold data is and how to interpret it
+
+    Returns:
+        The retriever that can load the thresholds
+    """
     threshold_format = threshold_definition.backend.format.lower()
 
     possible_retrievers = [
@@ -78,13 +87,11 @@ def get_thresholds(threshold_definition: specification.ThresholdSpecification) -
                 extra_kwargs['on_predicted'] = True
                 extra_kwargs['predicted_value_key'] = "prediction"
 
-                # TODO: Build custom transformation function if needed
-
         new_threshold = Threshold(
-                name=identifiers[0],
-                value=group.value,
-                weight=threshold_definition[identifiers[0]].weight,
-                **extra_kwargs
+            name=identifiers[0],
+            value=group.value,
+            weight=threshold_definition[identifiers[0]].weight,
+            **extra_kwargs
         )
 
         thresholds[identifiers[1]].append(new_threshold)

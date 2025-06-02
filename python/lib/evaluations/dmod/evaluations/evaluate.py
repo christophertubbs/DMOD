@@ -1,9 +1,12 @@
+"""
+Runs an evaluation based upon a given evaluation specification
+"""
 import os
 import typing
 import json
 import logging
 
-import pandas
+import polars
 
 from dmod.metrics.communication import Verbosity
 import dmod.metrics as metrics
@@ -29,29 +32,12 @@ class UnitConverter:
         self.__from_unit_field = from_unit_field
         self.__to_unit_field = to_unit_field
 
-    def _conversion(self, row):
-        """
-        Helper function used to convert the values in a singular row
-
-        Args:
-            row: A row from a data source
-
-        Returns:
-            A value converted from one measurement unit to another
-        """
-        if row[self.__from_unit_field] == row[self.__to_unit_field]:
-            return row[self.__value_field]
-
-        return measurement_units.convert(
-            row[self.__value_field],
-            row[self.__from_unit_field],
-            row[self.__to_unit_field]
-        )
-
-    def __call__(self, rows_to_convert: pandas.Series, *args, **kwargs) -> float:
-        return rows_to_convert.apply(
-            self._conversion,
-            axis=1
+    def __call__(self, frame: polars.DataFrame) -> polars.DataFrame:
+        return measurement_units.convert_frame(
+            frame=frame,
+            value_column=self.__value_field,
+            from_unit=self.__from_unit_field,
+            to_unit=self.__to_unit_field
         )
 
 
@@ -80,7 +66,7 @@ class Evaluator:
 
         if isinstance(communicators, metrics.CommunicatorGroup):
             self._communicators: metrics.CommunicatorGroup = communicators
-        elif isinstance(communicators, typing.Iterable) or isinstance(communicators, metrics.Communicator):
+        elif isinstance(communicators, (typing.Iterable, metrics.Communicator)):
             self._communicators: metrics.CommunicatorGroup = metrics.CommunicatorGroup(communicators)
         else:
             self._communicators: metrics.CommunicatorGroup = metrics.CommunicatorGroup()
@@ -101,14 +87,14 @@ class Evaluator:
         Returns:
             The maximum possible score of a whole evaluation
         """
-        total_threshold_weights = sum([configured_threshold for configured_threshold in self._instructions.thresholds])
-        total_metric_weights = sum([metric.weight for metric in self._instructions.scheme.metric_functions])
+        total_threshold_weights = sum(self._instructions.thresholds)
+        total_metric_weights = sum(metric.weight for metric in self._instructions.scheme.metric_functions)
 
         weight_per_location = total_metric_weights + total_threshold_weights
         return weight_per_location
 
     def _set_field_names(self):
-        error_messages = list()
+        error_messages = []
 
         observed_xaxis = None
         observed_value_field = None
@@ -187,7 +173,7 @@ class Evaluator:
 
                 raise mismatch_exception
 
-            elif observed_is_mismatched:
+            if observed_is_mismatched:
                 message = f"Crosswalk cannot be compiled - the new field name for observed locations " \
                           f"({crosswalk_definition.observation_field_name}) does not match the previous " \
                           f"field name ({observed_location_label})"
@@ -201,7 +187,8 @@ class Evaluator:
                 )
 
                 raise mismatch_exception
-            elif predicted_is_mismatched:
+
+            if predicted_is_mismatched:
                 message = f"Crosswalk cannot be compiled - the new field name for prediction locations " \
                           f"({crosswalk_definition.prediction_field_name}) does not match the previous " \
                           f"field name ({predicted_location_label})"
@@ -262,31 +249,27 @@ class Evaluator:
 
         return evaluation_results
 
-    def get_crosswalk(self) -> pandas.DataFrame:
+    def get_crosswalk(self) -> polars.DataFrame:
         """
         Gathers crosswalk data as specified via the instructions
 
         Returns:
             A DataFrame describing the mapping between observation and predicted locations
         """
-        crosswalk_data: typing.Optional[pandas.DataFrame] = None
-
+        crosswalk_data: typing.Optional[polars.DataFrame] = None
+        crosswalks: typing.List[polars.DataFrame] = []
         for crosswalk_definition in self._instructions.crosswalks:
             found_crosswalk = crosswalk.get_data(crosswalk_definition)
 
             if found_crosswalk is None or found_crosswalk.empty:
                 continue
+            crosswalks.append(found_crosswalk)
 
-            if crosswalk_data is None:
-                crosswalk_data = found_crosswalk
-            else:
-                crosswalk_data = pandas.concat([crosswalk_data, found_crosswalk])
-
-        if crosswalk_data is None or crosswalk_data.empty:
+        if crosswalk_data is None or len(crosswalk_data) == 0:
             message = "No crosswalk data could be found"
             missing_data_exception = ValueError(message)
 
-            additional_information = list()
+            additional_information = []
 
             common.on_each(
                 lambda cross: additional_information.append(f"No crosswalk data was found at {str(cross)}"),
@@ -304,9 +287,11 @@ class Evaluator:
 
             raise missing_data_exception
 
+        crosswalk_data = polars.concat(crosswalks)
+
         return crosswalk_data
 
-    def get_data_to_evaluate(self, crosswalk_data: pandas.DataFrame) -> pandas.DataFrame:
+    def get_data_to_evaluate(self, crosswalk_data: polars.DataFrame) -> polars.DataFrame:
         """
         Uses internal specification and discovered crosswalk data to organize what data to evaluate and how
 
@@ -316,8 +301,8 @@ class Evaluator:
         Returns:
             A DataFrame of observed and predicted data matched together for evaluation
         """
-        observations: typing.Optional[pandas.DataFrame] = None
-
+        observations: typing.Optional[polars.DataFrame] = None
+        observation_frames: typing.List[polars.DataFrame] = []
         self._communicators.info(
             "Loading evaluation input data",
             verbosity=Verbosity.LOUD,
@@ -327,13 +312,35 @@ class Evaluator:
         for observation_definition in self._instructions.observations:
             found_observations = data_retriever.read(observation_definition)
 
-            if found_observations is None or found_observations.empty:
+            if found_observations is None or len(found_observations) == 0:
                 continue
 
-            if observations is None:
-                observations = found_observations
-            else:
-                observations = pandas.concat([observations, found_observations])
+            observation_frames.append(found_observations)
+
+        if observation_frames:
+            observations = polars.concat(observation_frames)
+        else:
+            message = "No observation data could be found"
+
+            additional_information = []
+
+            common.on_each(
+                lambda observation_source: additional_information.append(f"No observation data was found at {str(observation_source)}"),
+                self._instructions.observations
+            )
+
+            missing_data_details = message + os.linesep + os.linesep.join(additional_information)
+
+            missing_data_exception = ValueError(missing_data_details)
+
+            self._communicators.error(
+                message + missing_data_details,
+                missing_data_exception,
+                verbosity=Verbosity.NORMAL,
+                publish=True
+            )
+
+            raise missing_data_exception
 
         self._communicators.info(
             "Finished loading observation data",
@@ -341,18 +348,44 @@ class Evaluator:
             publish=True
         )
 
-        predictions: typing.Optional[pandas.DataFrame] = None
+        predictions: typing.Optional[polars.DataFrame] = None
+        prediction_frames: typing.List[polars.DataFrame] = []
 
         for prediction_definition in self._instructions.predictions:
             found_predictions = data_retriever.read(prediction_definition)
 
-            if found_predictions is None or found_predictions.empty:
+            if found_predictions is None or len(found_predictions) == 0:
                 continue
 
-            if predictions is None:
-                predictions = found_predictions
-            else:
-                predictions = pandas.concat([predictions, found_predictions])
+            prediction_frames.append(found_predictions)
+
+        if prediction_frames:
+            predictions = polars.concat(prediction_frames)
+        else:
+
+            message = "No prediction data could be found"
+
+            additional_information = []
+
+            common.on_each(
+                lambda prediction_source: additional_information.append(
+                    f"No prediction data was found at {str(prediction_source)}"
+                ),
+                self._instructions.observations
+            )
+
+            missing_data_details = message + os.linesep + os.linesep.join(additional_information)
+
+            missing_data_exception = ValueError(missing_data_details)
+
+            self._communicators.error(
+                message + missing_data_details,
+                missing_data_exception,
+                verbosity=Verbosity.NORMAL,
+                publish=True
+            )
+
+            raise missing_data_exception
 
         self._communicators.info(
             "Finished loading prediction data",
@@ -360,38 +393,33 @@ class Evaluator:
             publish=True
         )
 
-        data = observations.merge(right=crosswalk_data, on=self._observed_location_field)
+        data = observations.join(other=crosswalk_data, how="inner", on=[self._observed_location_field])
 
         join_left_on = [self._predicted_location_field, self._observed_xaxis]
         join_right_on = [self._predicted_location_field, self._predicted_xaxis]
 
         try:
-            data = data.merge(
-                right=predictions,
+            common_columns = [
+                column_name
+                for column_name in data.columns
+                if column_name not in join_left_on
+                   and column_name in predictions.columns
+            ]
+            data = data.join(
+                other=predictions,
+                how="inner",
                 left_on=join_left_on,
                 right_on=join_right_on,
-                suffixes=('_observation', '_prediction')
+                suffix='_prediction'
             )
+            data = data.rename({
+                column_name: f"{column_name}_observation"
+                for column_name in common_columns
+            })
         except ValueError as e:
             logging.error(str(e), stack_info=True, exc_info=e)
-            left_types = {
-                key: {
-                    type(val)
-                    for val in data[key].values
-                }
-                for key in join_left_on
-            }
-
-            right_types = {
-                key: {
-                    type(val)
-                    for val in predictions[key].values
-                }
-                for key in join_right_on
-            }
-
             raise ValueError(
-                f"Can't merge data and predictions based on {str(left_types)} to {str(right_types)}, respectively"
+                f"Can't merge data and predictions based on {str(data.schema)} to {str(predictions.schema)}, respectively"
             ) from e
 
         self._communicators.info(
@@ -410,40 +438,20 @@ class Evaluator:
             observation_rule = threshold_specification.application_rules.observation_field
             prediction_rule = threshold_specification.application_rules.prediction_field
 
-            index_fields = list()
+            index_fields = []
 
-            if observation_rule and observation_rule.name not in data.keys():
-                def conversion_function(column_name_and_value: pandas.Series):
-                    """
-                    Converts a series of column names vs values to the desired data type
+            if observation_rule and observation_rule.name not in data.columns:
+                data = data.with_columns([
+                    polars.col(observation_rule.path).map_elements(observation_rule.to_datatype).alias(observation_rule.name),
+                ])
 
-                    Args:
-                        column_name_and_value:
-                            A pandas Series mapping column names to values
-                    Returns:
-                        The converted value
-                    """
-                    converted_value = observation_rule.to_datatype([value for value in column_name_and_value])
-                    return converted_value
-
-                data[observation_rule.name] = data[observation_rule.path].apply(conversion_function, axis=1)
                 index_fields.append(observation_rule.name)
 
-            if prediction_rule and prediction_rule.name not in data.keys():
-                def conversion_function(column_name_and_value: pandas.Series):
-                    """
-                    Converts a series of column names vs values to the desired data type
+            if prediction_rule and prediction_rule.name not in data.columns:
+                data = data.with_columns([
+                    polars.col(prediction_rule.path).map_elements(prediction_rule.to_datatype).alias(prediction_rule.name)
+                ])
 
-                    Args:
-                        column_name_and_value:
-                            A pandas Series mapping column names to values
-                    Returns:
-                        The converted value
-                    """
-                    converted_value = prediction_rule.to_datatype([value for value in column_name_and_value])
-                    return converted_value
-
-                data[prediction_rule.name] = data[prediction_rule.path].apply(conversion_function, axis=1)
                 index_fields.append(prediction_rule.name)
 
             data = data.set_index(keys=index_fields, drop=True)
@@ -456,7 +464,7 @@ class Evaluator:
 
         return data
 
-    def normalize_values(self, data_to_evaluate: pandas.DataFrame) -> pandas.DataFrame:
+    def normalize_values(self, data_to_evaluate: polars.DataFrame) -> polars.DataFrame:
         """
         Converts passed data into a common form for evaluation
 
@@ -472,8 +480,7 @@ class Evaluator:
         if data_to_evaluate['unit_prediction'].equals(data_to_evaluate['unit_observation']):
             return data_to_evaluate
 
-        related_keys = [self._predicted_value_field, "unit_prediction", "unit_observation"]
-        data_to_evaluate[self._predicted_value_field] = self._converter(data_to_evaluate[related_keys])
+        data_to_evaluate = self._converter(data_to_evaluate)
 
         data_to_evaluate["unit_prediction"] = data_to_evaluate["unit_observation"]
 
@@ -492,21 +499,21 @@ class Evaluator:
         Returns:
             A mapping between all locations to be evaluated and a series of thresholds used to do so
         """
-        thresholds: typing.Dict[str, typing.List[metrics.Threshold]] = dict()
+        thresholds: typing.Dict[str, typing.List[metrics.Threshold]] = {}
         for threshold_definition in self._instructions.thresholds:
             found_thresholds = threshold.get_thresholds(threshold_definition)
 
             for location, threshold_list in found_thresholds.items():
                 if location not in thresholds:
-                    thresholds[location] = list()
+                    thresholds[location] = []
                 thresholds[location].extend(threshold_list)
 
         return thresholds
 
     def score(
         self,
-        data_to_evaluate: pandas.DataFrame,
-        thresholds: typing.Dict[str, typing.Sequence[metrics.Threshold]]
+        data_to_evaluate: polars.DataFrame,
+        thresholds: typing.Dict[str, typing.Sequence[metrics.threshold.ThresholdMetadata]]
     ) -> typing.Dict[typing.Tuple[str, str], metrics.MetricResults]:
         """
         Performs the evaluation
@@ -526,28 +533,17 @@ class Evaluator:
             self._predicted_location_field
         ]
 
-        scores: typing.Dict[typing.Tuple[str, str], metrics.MetricResults] = dict()
+        scores: typing.Dict[typing.Tuple[str, str], metrics.MetricResults] = {}
 
-        for identifiers, group in data_to_evaluate.groupby(by=groupby_columns):  # type: tuple, pandas.DataFrame
+        for identifiers, group in data_to_evaluate.group_by(*groupby_columns):  # type: typing.Tuple[str, str], polars.DataFrame
             observed_location, predicted_location = identifiers     # type: str, str
 
             location_thresholds = thresholds.get(observed_location)
-
-            metadata = {
-                "observed_location": observed_location,
-                "predicted_location": predicted_location,
-            }
 
             self._communicators.info(
                 f"Creating truth tables for {str(identifiers)}",
                 verbosity=Verbosity.LOUD,
                 publish=True
-            )
-
-            truth_tables = metrics.categorical.TruthTables(
-                group[self._observed_value_field],
-                group[self._predicted_value_field],
-                location_thresholds
             )
 
             self._communicators.info(
@@ -559,11 +555,7 @@ class Evaluator:
             if location_thresholds:
                 location_scores = scheme.score(
                     group,
-                    self._observed_value_field,
-                    self._predicted_value_field,
-                    location_thresholds,
-                    metadata=metadata,
-                    truth_tables=truth_tables
+                    location_thresholds
                 )
                 scores[identifiers] = location_scores
                 if self._verbosity == Verbosity.ALL:

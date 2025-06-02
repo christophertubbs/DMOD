@@ -87,7 +87,7 @@ A very simple example would be:
 ```python
 class VolumeError(scoring.Metric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "The difference between the observed volume and the predicted volume"
 
     @classmethod
@@ -145,7 +145,7 @@ for example, is incredibly easy to implement:
 ```python
 class ProbabilityOfDetection(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "The probability that something was detected. Sensitive to hits, but ignores false alarms. " \
                "Very sensitive to the climatological frequency of the event. Good for rare events."
 

@@ -116,7 +116,7 @@ def get_metric_options() -> typing.List[typing.Dict[str, str]]:
     for metric in get_all_metrics():
         metrics.append({
             "name": metric.get_name(),
-            "description": metric.get_descriptions(),
+            "description": metric.get_description(),
             "identifier": metric.get_identifier()
         })
 
@@ -152,20 +152,20 @@ def series_to_numeric_sequence(
     if isinstance(series, pandas.DataFrame):
         series = series.index.to_series()
 
-    sequence = list()
+    sequence = []
 
     if len(series) == 0:
         return sequence
 
-    if isinstance(series, pandas.Series):
+    if not isinstance(series, pandas.Series):
         series = pandas.Series(series)
 
     if pandas_types.is_numeric_dtype(series):
         return series.to_list()
-    elif pandas_types.is_datetime64_any_dtype(series):
+    if pandas_types.is_datetime64_any_dtype(series):
         return [date.timestamp() for date in series]
-    else:
-        sequence = [index for index in range(len(series))]
+
+    sequence = list(range(len(series)))
 
     return sequence
 
@@ -337,7 +337,7 @@ class LinearTemporalTrendAbsoluteError(scoring.Metric):
         return "Linear Temporal Trend of Absolute Error"
 
     @classmethod
-    def get_descriptions(cls) -> str:
+    def get_description(cls) -> str:
         return "A measure of how performance changes over time. A positive result means that the data generally " \
                "worsened over time, 0 means it was consistently right or wrong, and a negative value indicates that " \
                "values improved over time"
@@ -397,7 +397,7 @@ class PearsonCorrelationCoefficient(scoring.Metric):
         return "Pearson Correlation Coefficient"
 
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "A measure of linear correlation between two sets of data"
 
     def __init__(self, weight: NUMBER):
@@ -446,7 +446,7 @@ class PearsonCorrelationCoefficient(scoring.Metric):
 
 class KlingGuptaEfficiency(scoring.Metric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "A goodness-of-fit measure providing a diagnostically interesting decomposition of the " \
                "Nash-Sutcliffe efficiency"
 
@@ -538,7 +538,7 @@ class KlingGuptaEfficiency(scoring.Metric):
 
 class NormalizedNashSutcliffeEfficiency(scoring.Metric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "A normalized statistic that measures the relative magnitude of noise compared to information"
 
     @classmethod
@@ -598,7 +598,7 @@ class NormalizedNashSutcliffeEfficiency(scoring.Metric):
 
 class VolumeError(scoring.Metric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "The difference between the observed volume and the predicted volume"
 
     @classmethod
@@ -633,6 +633,9 @@ class VolumeError(scoring.Metric):
             filtered_pairs = volume_threshold(pairs)
             difference = 0
             if not filtered_pairs.empty:
+                # This won't be in seconds but the interval probably will - this could end up calculating the volume
+                # across milliseconds or microseconds, not seconds, resulting in a HUGE value. A difference of
+                # 1.1751e9 might be represented as 1.1751e16
                 dates: typing.List[int] = [value.astype("int") for value in filtered_pairs.index.values]
                 area_under_observations = sklearn.metrics.auc(dates, filtered_pairs[observed_value_label])
                 area_under_predictions = sklearn.metrics.auc(dates, filtered_pairs[predicted_value_label])
@@ -644,7 +647,7 @@ class VolumeError(scoring.Metric):
 
 class ProbabilityOfDetection(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "The probability that something was detected. Sensitive to hits, but ignores false alarms. " \
                "Very sensitive to the climatological frequency of the event. Good for rare events."
 
@@ -658,7 +661,7 @@ class ProbabilityOfDetection(CategoricalMetric):
 
 class FalseAlarmRatio(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "The probability that something was falsely reported as happening. Sensitive to false alarms, " \
                "but ignores misses. Very sensitive to the climatological frequency of the event. " \
                "Should be used in conjunction with the probability of detection."
@@ -673,7 +676,7 @@ class FalseAlarmRatio(CategoricalMetric):
 
 class ProbabilityOfFalseDetection(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "Sensitive to false alarms, but ignores misses. Can be artificially improved by issuing fewer 'yes' " \
                "forecasts to reduce the number of false alarms. Not often reported for deterministic forecasts, " \
                "but is an important component of the Relative Operating Characteristic (ROC) used widely for " \
@@ -689,7 +692,7 @@ class ProbabilityOfFalseDetection(CategoricalMetric):
 
 class FrequencyBias(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return "Measures the ratio of the frequency of forecast events to the frequency of observed events. " \
                "Indicates whether the forecast system has a tendency to underforecast (BIAS<1) or overforecast (BIAS>1)"
 
@@ -703,7 +706,7 @@ class FrequencyBias(CategoricalMetric):
 
 class Accuracy(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return 'Overall, what fraction of the forecasts were correct? Can be misleading since it is heavily ' \
                'influenced by the most common category, usually "no event" in the case of rare weather.'
 
@@ -717,7 +720,7 @@ class Accuracy(CategoricalMetric):
 
 class CriticalSuccessIndex(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return 'How well did the forecast "yes" events correspond to the observed "yes" events? It can be thought ' \
                'of as the accuracy when correct negatives have been removed from consideration, that is, TS is only ' \
                'concerned with forecasts that count. Sensitive to hits, penalizes both misses and false alarms.'
@@ -732,7 +735,7 @@ class CriticalSuccessIndex(CategoricalMetric):
 
 class EquitableThreatScore(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return 'How well did the forecast "yes" events correspond to the observed "yes" events ' \
                '(accounting for hits due to chance)? Sensitive to hits. Because it penalises both misses and false ' \
                'alarms in the same way, it does not distinguish the source of forecast error.'
@@ -747,7 +750,7 @@ class EquitableThreatScore(CategoricalMetric):
 
 class GeneralSkill(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return 'What was the accuracy of the forecast relative to that of random chance?'
 
     @classmethod
@@ -760,7 +763,7 @@ class GeneralSkill(CategoricalMetric):
 
 class Precision(CategoricalMetric):
     @classmethod
-    def get_descriptions(cls):
+    def get_description(cls):
         return 'The ratio of the number of times predictions correctly predicted an event to the total number of ' \
                'times the predictions stated there would be an event.'
 

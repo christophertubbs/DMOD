@@ -532,10 +532,11 @@ class TruthTable(object):
 
         if top == bottom:
             self.__frequency_bias = 1.0
+
         if bottom == 0:
             return numpy.nan
-        else:
-            self.__frequency_bias = top / bottom
+
+        self.__frequency_bias = top / bottom
 
         return self.__frequency_bias
 
@@ -652,8 +653,8 @@ class TruthTable(object):
 
         if bottom == 0:
             return numpy.nan
-        else:
-            self.__general_skill = top / bottom
+
+        self.__general_skill = top / bottom
 
         return self.__general_skill
 

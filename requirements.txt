@@ -13,6 +13,7 @@ setuptools
 Deprecated
 cryptography
 flask
+polars
 pandas
 geopandas
 gitpython

@@ -101,7 +101,7 @@ class NetcdfWriter(writer.OutputWriter):
             metric_function: metric_functions.scoring.Metric = metric_functions.get_metric(metric_name, weight)
             result_attributes = {
                 "long_name": metric_function.get_name(),
-                "description": metric_function.get_descriptions(),
+                "description": metric_function.get_description(),
                 "ideal_value": metric_function.ideal_value,
                 "greater_is_better": metric_function.greater_is_better,
                 "lower_bound": metric_function.lower_bound,
@@ -110,7 +110,7 @@ class NetcdfWriter(writer.OutputWriter):
 
             scaled_result_attributes = {
                 "long_name": "Scaled " + metric_function.get_name(),
-                "description": metric_function.get_descriptions(),
+                "description": metric_function.get_description(),
                 "ideal_value": weight,
             }
             clean_metric_name = metric_name.replace(" ", "_")

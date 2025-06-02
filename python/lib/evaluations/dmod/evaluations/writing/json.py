@@ -107,7 +107,7 @@ class JSONWriter(OutputWriter):
             found_metric = metrics.get_metric(metric_function.name, metric_function.weight)
             data['metrics'].append({
                 "name": found_metric.name,
-                "description": found_metric.get_descriptions(),
+                "description": found_metric.get_description(),
                 "weight": found_metric.weight
             })
 

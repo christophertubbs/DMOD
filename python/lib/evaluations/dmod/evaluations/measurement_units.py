@@ -1,38 +1,17 @@
 import typing
 import numbers
-import pint.registry
+
+import polars
 
 _T = typing.TypeVar("_T")
 
+from dmod.metrics.unit_registry import UnitRegistry
 
-class UnitConverter:
+
+class UnitConverter(UnitRegistry):
     """
     A wrapper for a pint conversion registry containing common, yet abnormal units
     """
-    def __init__(self, synonyms: typing.Dict[str, str] = None):
-        self.__unsupported_to_supported_units = {
-            "m3 s-1": "m^3/s",
-            "ft3 s-1": "ft^3/s",
-            "m3/s": "m^3/s",
-            "ft3/s": "ft^3/s"
-        }
-
-        if synonyms:
-            self.__unsupported_to_supported_units.update(synonyms)
-
-        self.__registry = pint.registry.UnitRegistry()
-
-        self.__registry.define("m3 = m^3")
-        self.__registry.define("ft3 = ft^3")
-
-        self.__registry.define("cfs = ft^3/s")
-        self.__registry.define("CFS = ft^3/s")
-
-        self.__registry.define("KCFS = 1000 * cfs")
-        self.__registry.define("kcfs = 1000 * cfs")
-
-        self.__registry.define("cms = m^3/s")
-        self.__registry.define("CMS = m^3/s")
 
     def convert(self, value: _T, from_unit: str, to_unit: str) -> _T:
         """
@@ -51,62 +30,51 @@ class UnitConverter:
 
         return self.__registry.convert(value, from_unit, to_unit)
 
-    def get_quantity(self, value: _T, value_type: str) -> pint.Quantity:
+    def convert_mapping(
+        self,
+        mapping: typing.Mapping[typing.Literal["value", "to_unit", "from_unit"], typing.Union[str,float]]
+    ) -> float:
+        return self.convert(**mapping)
+
+    def convert_frame(
+        self,
+        frame: polars.DataFrame,
+        value_column: str,
+        from_unit: str,
+        to_unit: str
+    ) -> polars.DataFrame:
         """
-        Converts a value into a specified Quantity object
-
-        >>> example = UnitConverter()
-        >>> quantity = example.get_quantity(5.48, 'ft3 s-1')
-        >>> similar_quantity = example.registry.Quantity(5.48, 'ft3/s')
-        >>> similar_quantity.magnitude == quantity.magnitude
-        True
-        >>> similar_quantity.units == quantity.units
-        True
-        >>> similar_quantity == quantity
-        True
-        >>> dissimilar_quantity = example.registry.Quantity(5.48, 'm3 s-1')
-        >>> dissimilar_quantity.magnitude == quantity.magnitude
-        False
-        >>> dissimilar_quantity.units == quantity.units
-        False
-        >>> dissimilar_quantity == quantity
-        False
-
-        NOTE: Quantity objects may be used just like regular values, but with additional logic and functions.
+        Converts values in one column in a dataframe from the given unit to the other given unit
 
         Args:
-            value: The amount in the Quantity
-            value_type: The unit of the Quantity
+            frame:
+            value_column:
+            from_unit:
+            to_unit:
 
         Returns:
-
+            The updated dataframe with the column bearing the value having the same value in another unit
         """
-        value_type = self.__unsupported_to_supported_units.get(value_type, value_type)
+        if from_unit in frame.columns:
+            from_expression = polars.col(from_unit).alias("from_unit")
+        else:
+            from_expression = polars.lit(from_unit).alias("from_unit")
 
-        return self.__registry.Quantity(value, value_type)
+        if to_unit in frame.columns:
+            to_expression = polars.col(to_unit).alias("to_unit")
+        else:
+            to_expression = polars.lit(to_unit).alias("to_unit")
 
-    @property
-    def unsupported_to_supported_units(self) -> typing.Dict[str, str]:
-        """
-        Creates a copy of the mapping from specialized unit descriptors `not` supported by pint to matching
-        unit descriptors that ARE supported by pint
+        value_expression = polars.col(value_column).alias("value")
 
-        The mapping just links unsupported synonyms, like "m3 s-1" => "m^3/s". "m3 s-1" may be considered an oddball,
-        but it IS used by data sources that this library needs to support
-
-        Returns:
-            The mapping from specialized unit descriptors `not` supported by pint to matching unit descriptors
-            that ARE supported by pint
-        """
-        return self.__unsupported_to_supported_units.copy()
-
-    @property
-    def registry(self) -> pint.registry.UnitRegistry:
-        """
-        Returns:
-            The raw pint registry used by the converter
-        """
-        return self.__registry
+        return frame.with_columns([
+            polars.struct(
+                [value_expression, from_expression, to_expression]
+            ).map_elements(
+                self.convert_mapping,
+                return_dtype=polars.Float32
+            ).alias(value_column)
+        ])
 
 
 _COMMON_CONVERTER = UnitConverter()
@@ -125,3 +93,24 @@ def convert(value: numbers.Number, from_unit: str, to_unit: str):
         A new number reflecting a change of measurement unit
     """
     return _COMMON_CONVERTER.convert(value, from_unit, to_unit)
+
+
+def convert_frame(
+    frame: polars.DataFrame,
+    value_column: str,
+    from_unit: str,
+    to_unit: str
+) -> polars.DataFrame:
+    """
+    Converts values in one column in a dataframe from the given unit to the other given unit
+
+    Args:
+        frame:
+        value_column:
+        from_unit:
+        to_unit:
+
+    Returns:
+        The updated dataframe with the column bearing the value having the same value in another unit
+    """
+    return _COMMON_CONVERTER.convert_frame(frame, value_column, from_unit, to_unit)

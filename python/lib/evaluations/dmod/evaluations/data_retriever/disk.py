@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
-import typing
+import pathlib
 import os
 import re
 import inspect
 import logging
 
-import pandas
+import polars
 
-import dmod.core.common as common
+import typing_extensions as typing
+
+from dmod.core import common
 
 from .. import specification
 from .. import retrieval
@@ -15,12 +16,33 @@ from .. import retrieval
 from .. import reader
 from .. import util
 
+ParamSpec = typing.ParamSpec('ParamSpec')
+"""A type hint for variable parameters"""
+
+DataFrameCreator = typing.Callable[
+    typing.Concatenate[typing.Union[typing.AnyStr, bytes, pathlib.Path, typing.IO], ParamSpec],
+    polars.DataFrame
+]
+"""A function that may be used to construct a dataframe based on a path or raw input data"""
+
 
 def get_datasource(datasource_definition: specification.DataSourceSpecification) -> retrieval.Retriever:
+    """
+    Get a retriever based off of the format variable in the backend field of the datasource definition
+
+    Args:
+        datasource_definition: The definition of a datasource from a project configuration
+
+    Returns:
+        A retriever based off of the format variable in the backend field of the datasource definition
+    """
     return __FORMAT_MAPPING[datasource_definition.backend.format](datasource_definition)
 
 
 class JSONDataRetriever(retrieval.Retriever):
+    """
+    Parses input data from a json document
+    """
     @classmethod
     def get_purpose(cls) -> str:
         """
@@ -31,19 +53,34 @@ class JSONDataRetriever(retrieval.Retriever):
 
     @property
     def definition(self) -> specification.DataSourceSpecification:
+        """
+        The data source that spurred the creation of this retriever
+        """
         return self._definition
 
     @classmethod
     def get_format(cls) -> str:
+        """
+        The data format that this retriever consumes
+        """
         return "json"
 
-    def retrieve(self, *args, **kwargs) -> pandas.DataFrame:
+    def retrieve(self, **kwargs) -> polars.DataFrame:
+        """
+        Load the data described within the data source definition
+
+        Returns:
+
+        """
+        if kwargs:
+            raise ValueError(f"Unrecognized arguments: {kwargs}")
+
         documents = {
             str(source): util.data_to_dictionary(self.backend.read(source))
             for source in self.backend.sources
         }
 
-        frames = dict()
+        loaded_data: typing.Optional[polars.DataFrame] = None
 
         for document_name, document in documents.items():  # type: str, typing.Dict[str, typing.Any]
             frame = None
@@ -56,26 +93,13 @@ class JSONDataRetriever(retrieval.Retriever):
                 if frame is None:
                     frame = selected_data
                 else:
-                    if util.is_indexed(frame):
-                        frame.reset_index(inplace=True)
-
-                    if util.is_indexed(selected_data):
-                        selected_data.reset_index(inplace=True)
-
                     common_columns = [
                         column_name
-                        for column_name in frame.keys()
-                        if column_name in selected_data.keys()
+                        for column_name in frame.columns
+                        if column_name in selected_data.columns
                     ]
 
-                    if common_columns:
-                        frame.set_index(keys=common_columns, inplace=True)
-                        selected_data.set_index(keys=common_columns, inplace=True)
-
-                    frame = frame.join(selected_data)
-
-                    if util.is_indexed(frame):
-                        frame.reset_index(inplace=True)
+                    frame = frame.join(selected_data, on=common_columns)
 
             constants = [
                 selector
@@ -83,15 +107,9 @@ class JSONDataRetriever(retrieval.Retriever):
                 if selector.where == 'constant'
             ]
 
-            frame_index = frame.index
-
             for constant in constants:
                 value = constant.to_datatype(constant.path[0])
-                constant_frame = pandas.DataFrame(
-                        data={constant.name: [value for _ in range(len(frame_index))]},
-                        index=frame_index
-                )
-                frame = frame.join(constant_frame)
+                frame.with_columns(**{constant.name: value})
 
             if self.definition.locations is not None and self.definition.locations.from_field == "filename":
                 name = None
@@ -105,26 +123,27 @@ class JSONDataRetriever(retrieval.Retriever):
                 if not name:
                     name = os.path.splitext(os.path.basename(document_name))[0]
 
-                frame['location'] = name
-
-            if util.is_indexed(frame):
-                frame = frame.reset_index()
+                frame = frame.with_columns(location=name)
 
             for mapping in self.definition.field_mapping:
                 if mapping.map_type != "column":
                     continue
 
                 if mapping.value in frame:
-                    frame.rename(columns={mapping.value: mapping.field}, inplace=True)
+                    frame = frame.rename({mapping.value: mapping.field})
 
-            frames[document_name] = frame
+            if loaded_data is None:
+                loaded_data = frame
+            else:
+                loaded_data = loaded_data.vstack(frame)
 
-        combined_frame = pandas.concat([frame for frame in frames.values()])
-
-        return combined_frame
+        return loaded_data
 
 
 class FrameDataRetriever(retrieval.Retriever):
+    """
+    Retrieves tabular data from CSV files
+    """
     @classmethod
     def get_purpose(cls) -> str:
         """
@@ -141,8 +160,21 @@ class FrameDataRetriever(retrieval.Retriever):
     def get_format(cls) -> str:
         return "csv"
 
-    def retrieve(self, *args, **kwargs) -> pandas.DataFrame:
-        constructor_signature = inspect.signature(pandas.read_csv)
+    @classmethod
+    def default_read_parameters(cls) -> typing.Dict[str, typing.Any]:
+        return {
+            "try_parse_dates": True
+        }
+
+    @classmethod
+    def read_function(cls) -> DataFrameCreator:
+        """
+        The function used to interpret the stream read from the source
+        """
+        return polars.read_csv
+
+    def retrieve(self, **kwargs) -> polars.DataFrame:
+        constructor_signature = inspect.signature(self.read_function)
         provided_parameters = {
             key: value
             for key, value in self.backend.definition.properties.items()
@@ -163,22 +195,25 @@ class FrameDataRetriever(retrieval.Retriever):
             else:
                 provided_parameters[option] = value
 
-        # TODO: 'date_parser' is deprecated in pandas 2.0. In the future, find a way to bring in date columns
-        #  as objects then call 'to_datetime' on the column after loading.
-        #  You can probably just check for any 'parse_dates' parameters in 'provided_parameters
-        if 'date_parser' not in provided_parameters:
-            provided_parameters['date_parser'] = util.parse_non_naive_dates
+        for key, default_value in self.default_read_parameters().items():
+            provided_parameters.setdefault(key, default_value)
+
+        provided_parameters.update({
+            key: value
+            for key, value in kwargs.items()
+            if key in constructor_signature.parameters
+        })
 
         combined_table = None
 
         for source in self.backend.sources:
             try:
-                document = pandas.read_csv(self.backend.read_stream(source), **provided_parameters)
+                document = self.read_function()(self.backend.read_stream(source), **provided_parameters)
             except Exception as e:
                 logging.error(f"Failed to read {source}", exc_info=e)
                 raise
 
-            column_names: typing.List[str] = list()
+            column_names: typing.List[str] = []
 
             variable_selectors = [
                 selector
@@ -190,20 +225,20 @@ class FrameDataRetriever(retrieval.Retriever):
                 if selector.where.lower() != 'column':
                     raise ValueError(f"Column to be found in a '{selector.where}' is not valid for csv data.")
 
-                if selector.name not in document.keys():
+                if selector.name not in document.columns:
                     raise KeyError(f"There is not a column named '{selector.name}' in '{source}'")
 
                 if selector.name not in column_names:
                     column_names.append(selector.name)
 
                 for index in selector.associated_fields:
-                    if index.name not in document.keys():
+                    if index.name not in document.columns:
                         raise KeyError(f"There is not a column named '{index.name}' in '{source}'")
 
                     if index.name not in column_names:
                         column_names.append(index.name)
 
-            table: pandas.DataFrame = document[column_names]
+            table: polars.DataFrame = document[column_names]
 
             has_locations = self.definition.locations is not None
             should_identify_locations = has_locations and self.definition.locations.identify
@@ -213,22 +248,17 @@ class FrameDataRetriever(retrieval.Retriever):
                 file_name_without_extension = os.path.splitext(os.path.basename(source))[0]
                 pattern = self.definition.locations.pattern
 
-                path_to_check = os.path.join(*pattern) if common.is_sequence_type(pattern) else pattern
-                search_results = re.search(
-                        path_to_check,
-                        file_name_without_extension
-                )
+                path_to_check = re.compile(os.path.join(*pattern) if common.is_sequence_type(pattern) else pattern)
+                search_results = path_to_check.search(file_name_without_extension)
 
                 name = search_results.group() if search_results else file_name_without_extension
 
-                table = table.assign(location=[name for _ in range(len(table))])
+                table = table.with_columns(location=name)
 
             if self.definition.unit.value:
-                index = table.index
-                unit_field = pandas.Series(data=[self.definition.unit.value for _ in range(len(index))], index=index)
-                table['unit'] = unit_field
+                table = table.with_columns(unit=self.definition.unit.value)
 
-            fields_to_rename: typing.Dict[str, str] = dict()
+            fields_to_rename: typing.Dict[str, str] = {}
 
             for mapping in self.definition.field_mapping:
                 if mapping.map_type.lower() != 'column':
@@ -237,42 +267,46 @@ class FrameDataRetriever(retrieval.Retriever):
                             f"via a '{mapping.map_type}' for CSV data."
                     )
 
-                if mapping.value not in table.keys():
+                if mapping.value not in table.columns:
                     raise KeyError(
-                            f"There is not a column named '{mapping.value}' to rename in the retrieved table; "
-                            f"available columns are: [{', '.join([column_name for column_name in table.keys()])}]"
+                        f"There is not a column named '{mapping.value}' to rename in the retrieved table; "
+                        f"available columns are: [{', '.join(table.columns)}]"
                     )
 
                 fields_to_rename[mapping.value] = mapping.field
 
             if fields_to_rename:
-                table.rename(columns=fields_to_rename, inplace=True)
+                table = table.rename(fields_to_rename)
 
-            constants = [
-                selector for selector in self.definition.value_selectors
-                if selector.where == 'constant'
-            ]
-
-            frame_index = table.index
-
-            for constant in constants:
-                values = {
-                    constant.name: [
-                        constant.to_datatype(constant.path[0])
-                        for _ in range(len(frame_index))
-                    ]
-                }
-                constant_frame = pandas.DataFrame(data=values, index=frame_index)
-                table = table.join(constant_frame)
+            table = table.with_columns(**{
+                constant.name: constant.to_datatype(constant.path[0])
+                for constant in self.definition.value_selectors
+                if constant.where == 'constant'
+            })
 
             if combined_table is None:
                 combined_table = table
             else:
-                combined_table = pandas.concat([combined_table, table])
+                combined_table = combined_table.vstack(table)
 
         return combined_table
 
+
+class ParquetDataRetriever(FrameDataRetriever):
+    """
+    A retriever for parquet files
+    """
+    @classmethod
+    def get_format(cls) -> str:
+        return "parquet"
+
+    @classmethod
+    def read_function(cls) -> DataFrameCreator:
+        return polars.read_parquet
+
+
 __FORMAT_MAPPING = {
     "json": JSONDataRetriever,
-    "csv": FrameDataRetriever
+    "csv": FrameDataRetriever,
+    "parquet": ParquetDataRetriever,
 }

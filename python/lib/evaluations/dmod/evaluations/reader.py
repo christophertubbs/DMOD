@@ -1,16 +1,28 @@
-#!/usr/bin/env python3
+"""
+Defines a function used to select specific data from a dictionary based on a configured path
+"""
 import typing
 
-import pandas
+import polars
 import jsonpath_ng as jsonpath
 
 
 from . import specification
 
 
-def select_values(document: dict, selector: specification.ValueSelector):
+def select_values(document: dict, selector: specification.ValueSelector) -> typing.Optional[polars.DataFrame]:
+    """
+    Retrieve data from a dictionary based on a configuration path and load it into a dataframe
+
+    Args:
+        document: The dictionary to navigate and collect data from
+        selector: The value selector that details what all to retrieve
+
+    Returns:
+        A dataframe containing the selected values
+    """
+    table: typing.Optional[polars.DataFrame] = None
     origin_expression: jsonpath.This = jsonpath.parse(".".join(selector.origin))
-    tables: typing.List[pandas.DataFrame] = list()
 
     for element in origin_expression.find(document):
         full_path = str(element.full_path)
@@ -23,7 +35,7 @@ def select_values(document: dict, selector: specification.ValueSelector):
         if not value_results:
             continue
 
-        columns = dict()
+        columns = {}
 
         if len(value_results) == 1:
             if selector.where == "key":
@@ -44,7 +56,7 @@ def select_values(document: dict, selector: specification.ValueSelector):
 
         for index in selector.associated_fields:
             if selector.where.lower() == "key":
-                column_data = list()
+                column_data = []
                 missing_entries = 0
 
                 for result in value_results:
@@ -87,12 +99,9 @@ def select_values(document: dict, selector: specification.ValueSelector):
                         for result in index_results
                     ]
 
-        tables.append(pandas.DataFrame(data=columns))
+        if table is None:
+            table = polars.DataFrame(data=columns)
+        else:
+            table = table.vstack(polars.DataFrame(data=columns))
 
-    if len(tables) == 1:
-        return tables[0]
-    elif tables:
-        table = pandas.concat(tables, ignore_index=True)
-        return table
-
-    return None
+    return table

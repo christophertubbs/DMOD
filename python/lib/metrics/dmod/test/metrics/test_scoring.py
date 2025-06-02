@@ -3,8 +3,10 @@ import typing
 import os
 import unittest
 
-import pandas
-from dmod.metrics import Scores
+import polars
+
+from dmod.metrics.expressions import PairTableMetadata
+from ...metrics import Scores
 
 from ...metrics.threshold import Threshold
 from ...metrics import scoring
@@ -28,6 +30,15 @@ THRESHOLD_NAME_CASE_FUNCTION: typing.Callable[[str], str] = str.title
 
 
 def normalize_threshold_name(threshold_name: str) -> str:
+    """
+    Converts the name of a threshold into a common format
+
+    Args:
+        threshold_name: The name of a threshold
+
+    Returns:
+        The name of a threshold in a common format
+    """
     return THRESHOLD_NAME_CASE_FUNCTION(threshold_name)
 
 
@@ -38,6 +49,7 @@ DEFAULT_WEIGHTS: typing.Dict[str, float] = {
     normalize_threshold_name("Major"): 1,
     normalize_threshold_name("Record"): 1
 }
+"""The significance of each threshold"""
 
 BASE_THRESHOLDS = {
     normalize_threshold_name("All"): 0,
@@ -46,28 +58,49 @@ BASE_THRESHOLDS = {
     normalize_threshold_name("Major"): 43,
     normalize_threshold_name("Record"): 60
 }
+"""Values to use for thresholds"""
 
 
-def load_dataframe(path: str) -> pandas.DataFrame:
-    frame = pandas.read_csv(path, parse_dates=['date'])
-    frame.set_index("date", inplace=True)
+def load_dataframe(path: str) -> polars.DataFrame:
+    """
+    Read data from a CSV file into a Dataframe
+
+    Args:
+        path: The path to the data
+
+    Returns:
+        The data in the form of a dataframe
+    """
+    frame = polars.read_csv(path)
     return frame
 
 
-def get_model_data() -> typing.Dict[str, pandas.DataFrame]:
+def get_model_data() -> typing.Dict[str, polars.DataFrame]:
+    """
+    Get data meant to serve as 'experiment' values, organized by model name
+
+    Returns:
+        A mapping between model name and their values
+    """
     data = {
-        name: load_dataframe(path)
+        name: polars.read_csv(path)
         for name, path in MODEL_DATA.items()
     }
     return data
 
 
-def get_observations() -> pandas.DataFrame:
+def get_observations() -> polars.DataFrame:
+    """
+    Load observation data
+
+    Returns:
+        A dataframe containing observations to be used as 'truth' values
+    """
     data = load_dataframe(OBSERVATIONS_SOURCE)
     return data
 
 
-def get_thresholds(weights: typing.Dict[str, float] = None) -> typing.Sequence[Threshold]:
+def get_thresholds(weights: typing.Dict[str, float] = None) -> polars.DataFrame:
     if weights is None:
         weights = DEFAULT_WEIGHTS
 
@@ -95,9 +128,20 @@ def get_thresholds(weights: typing.Dict[str, float] = None) -> typing.Sequence[T
     return thresholds
 
 
+def get_table_metadata() -> PairTableMetadata:
+    return PairTableMetadata(
+        control_column_name="",
+        simulation_column_name="",
+        control_location_column_name="",
+        simulation_location_column_name="",
+        time_column_name="",
+        unit_name=""
+    )
+
+
 class TestScoring(unittest.TestCase):
     def setUp(self) -> None:
-        self.observations = get_observations()
+        self.observations: polars.DataFrame = get_observations()
         self.model_data = get_model_data()
         self.thresholds = get_thresholds()
         self.truth_tables = dict()
