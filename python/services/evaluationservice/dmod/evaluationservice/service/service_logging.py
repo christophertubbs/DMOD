@@ -511,11 +511,13 @@ DEFAULT_LOGGING_CONFIGURATION = {
     'loggers': {
         DEFAULT_LOGGER_NAME: {
             'handlers': [f'{DEFAULT_LOGGER_NAME}_Handler', 'stdout'],
-            'level': get_log_level()
+            'level': get_log_level(),
+            'propagate': False
         },
         DEFAULT_SOCKET_LOGGER_NAME: {
             'handlers': [f"{DEFAULT_SOCKET_LOGGER_NAME}_Handler", "stdout"],
-            'level': get_socket_log_level()
+            'level': get_socket_log_level(),
+            'propagate': False
         }
     }
 }
@@ -642,7 +644,7 @@ def info(message: MESSAGE, logger_name: str = None):
         message: The message to log
         logger_name: The name of the logger to use. The default is used if none is passed
     """
-    log(message, logger_name, level=logging.INFO)
+    log(message, logger_name=logger_name, level=logging.INFO)
 
 
 def warn(message: MESSAGE, logger_name: str = None):
@@ -653,7 +655,7 @@ def warn(message: MESSAGE, logger_name: str = None):
         message: The message to log
         logger_name: The name of the logger to use. The default is used if none is passed
     """
-    log(message, logger_name, level=logging.WARNING)
+    log(message, logger_name=logger_name, level=logging.WARNING)
 
 
 def warning(message: MESSAGE, logger_name: str = None):
@@ -664,7 +666,7 @@ def warning(message: MESSAGE, logger_name: str = None):
         message: The message to log
         logger_name: The name of the logger to use. The default is used if none is passed
     """
-    log(message, logger_name, level=logging.WARNING)
+    log(message, logger_name=logger_name, level=logging.WARNING)
 
 
 def error(message: MESSAGE, exception: Exception = None, logger_name: str = None):
@@ -687,7 +689,7 @@ def debug(message: MESSAGE, logger_name: str = None):
         message: A diagnostic message or exception to write to a log
         logger_name: The name of the logger to write to
     """
-    log(message, logger_name, level=logging.DEBUG)
+    log(message, logger_name=logger_name, level=logging.DEBUG)
 
 
 def get_logger(logger_name: str = None) -> ConfiguredLogger:
